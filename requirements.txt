@@ -1,6 +1,7 @@
 gymnasium[atari, accept-rom-license]
 ale-py
 shimmy[atari]
+matplotlib
 --extra-index-url https://download.pytorch.org/whl/cu129
 torch
 torchvision

@@ -2,6 +2,7 @@ import gymnasium as gym
 from collections import deque
 import time
 import torch
+from utils import display_stacked_obs
 
 class Agent:
 
@@ -54,6 +55,8 @@ class Agent:
                 obs, reward, term, trunc, info = self.env.step(action)
 
                 obs = self.process_observation(obs)
+                
+                display_stacked_obs(obs)
 
                 done = (term or trunc)
 
