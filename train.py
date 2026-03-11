@@ -4,6 +4,8 @@ import ale_py
 
 gym.register_envs(ale_py)
 
-env = gym.make("ALE/Breakout-v5")
+env = gym.make("ALE/Breakout-v5", render_mode="human")
 
-agent = Agent() 
+agent = Agent(env=env) 
+
+agent.train()
