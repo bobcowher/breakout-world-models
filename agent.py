@@ -71,6 +71,8 @@ class Agent:
 
                 self.memory.store_transition(obs, action, reward, next_obs, done)
 
+                print(reward)
+
 
         self.memory.print_stats()
 
