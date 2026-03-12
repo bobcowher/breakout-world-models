@@ -4,7 +4,7 @@ import ale_py
 
 gym.register_envs(ale_py)
 
-env = gym.make("ALE/Breakout-v5", render_mode="human")
+env = gym.make("ALE/Breakout-v5", render_mode="rgb_array")
 
 agent = Agent(env=env) 
 

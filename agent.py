@@ -2,16 +2,25 @@ import gymnasium as gym
 from collections import deque
 import time
 import torch
+from buffer import ReplayBuffer
 from utils import display_stacked_obs
 
 class Agent:
 
-    def __init__(self, env : gym.Env) -> None:
+    def __init__(self, env : gym.Env,
+                       max_buffer_size : int = 10000) -> None:
         self.env = env
-        self.max_episode_steps = 500
         self.frame_stack = 4
-
         self.frames = deque(maxlen=self.frame_stack)
+        self.device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+
+        obs, info = self.env.reset()
+
+        obs = self.process_observation(obs)
+
+        self.max_episode_steps = 500
+
+        self.memory = ReplayBuffer(max_size=max_buffer_size, input_shape=obs.shape, n_actions=self.env.action_space.n, input_device=self.device, output_device=self.device)
     
     def init_frame_stack(self, obs):
         """Call once after env.reset().  Pre-fill both deques."""
@@ -52,13 +61,18 @@ class Agent:
 
                 action = self.env.action_space.sample()
 
-                obs, reward, term, trunc, info = self.env.step(action)
+                next_obs, reward, term, trunc, info = self.env.step(action)
 
-                obs = self.process_observation(obs)
+                next_obs = self.process_observation(next_obs)
                 
-                display_stacked_obs(obs)
+                # display_stacked_obs(obs)
 
                 done = (term or trunc)
+
+                self.memory.store_transition(obs, action, reward, next_obs, done)
+
+
+        self.memory.print_stats()
 
 
                 # time.sleep(0.01)

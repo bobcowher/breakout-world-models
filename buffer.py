@@ -81,3 +81,12 @@ class ReplayBuffer:
         actions     = self.action_memory[batch].to(self.output_device)
 
         return states, actions, rewards, next_states, dones
+
+    def print_stats(self):
+        filled = min(self.mem_ctr, self.mem_size)
+        tensors = [self.state_memory, self.next_state_memory,
+                   self.action_memory, self.reward_memory, self.terminal_memory]
+        used_bytes  = sum(t.element_size() * t.numel() * filled / self.mem_size for t in tensors)
+        total_bytes = sum(t.element_size() * t.numel() for t in tensors)
+        print(f"{filled} memories loaded | "
+              f"used: {used_bytes / 1e9:.3f} GB / {total_bytes / 1e9:.3f} GB")
