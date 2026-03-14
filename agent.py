@@ -4,6 +4,7 @@ import time
 import torch
 from buffer import ReplayBuffer
 from utils import display_stacked_obs
+from models.world_model import WorldModel
 
 class Agent:
 
@@ -21,6 +22,10 @@ class Agent:
         self.max_episode_steps = 500
 
         self.memory = ReplayBuffer(max_size=max_buffer_size, input_shape=obs.shape, n_actions=self.env.action_space.n, input_device=self.device, output_device=self.device)
+
+        # self.world_model = WorldModel(observation_shape=obs.shape, embed_dim=1024)
+
+
     
     def init_frame_stack(self, obs):
         """Call once after env.reset().  Pre-fill both deques."""
@@ -44,6 +49,12 @@ class Agent:
 
         return obs_stacked
 
+    def train_world_model(self, epochs):
+        
+        for i in range(epochs):
+            pass
+
+
     def train(self, episodes=1):
 
         total_steps = 0
@@ -65,7 +76,7 @@ class Agent:
 
                 next_obs = self.process_observation(next_obs)
                 
-                # display_stacked_obs(obs)
+                display_stacked_obs(obs)
 
                 done = (term or trunc)
 

@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from models.base import BaseModel
 
-class Encoder(BaseModel):
+class WorldModel(BaseModel):
 
     def __init__(self, observation_shape=(), embed_dim=1024):
         super().__init__()
@@ -45,7 +45,12 @@ class Encoder(BaseModel):
         x = F.elu(self.conv2(x))
         x = F.elu(self.conv3(x))
         x = F.elu(self.conv4(x))
-        return x  # (B, C_enc, H_enc, W_enc)
+
+        x = torch.flatten(x)
+        x = self.fc_enc(x)
+        
+        reward_pred = self.reward_pred(x)
+        return reward_pred  # (B, C_enc, H_enc, W_enc)
 
     def _conv_forward(self, x):
         x = self._conv_features(x)
