@@ -12,7 +12,7 @@ class WorldModel(BaseModel):
         # print(observation_shape[-1])
         # conv_output_dim = 64
 
-        self.conv1 = nn.Conv2d(1, 48, kernel_size=4, stride=2, padding=1)
+        self.conv1 = nn.Conv2d(4, 48, kernel_size=4, stride=2, padding=1)
         self.conv2 = nn.Conv2d(48, 96, kernel_size=4, stride=2, padding=1)
         self.conv3 = nn.Conv2d(96, 192, kernel_size=4, stride=2, padding=1)
         self.conv4 = nn.Conv2d(192, 384, kernel_size=4, stride=2, padding=1)
@@ -28,7 +28,7 @@ class WorldModel(BaseModel):
 
         self.fc_enc = nn.Linear(self.flattened_dim, embed_dim)  # ADD THIS
 
-        self.reward_pred = nn.Linear(embed_dim, 2)
+        self.reward_pred = nn.Linear(embed_dim, 1)
 
         # self.conv3 = nn.Conv2d()
 

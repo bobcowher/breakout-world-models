@@ -6,11 +6,13 @@ from buffer import ReplayBuffer
 from utils import display_stacked_obs
 from models.world_model import WorldModel
 import cv2
+import torch.nn.functional as F
 
 class Agent:
 
     def __init__(self, env : gym.Env,
-                       max_buffer_size : int = 10000) -> None:
+                       max_buffer_size : int = 10000,
+                       world_model_batch_size = 8) -> None:
         self.env = env
         self.frame_stack = 4
         self.frames = deque(maxlen=self.frame_stack)
@@ -26,9 +28,11 @@ class Agent:
 
         # print(torch.squeeze(obs).shape)
 
-        self.world_model = WorldModel(observation_shape=obs.shape, embed_dim=1024)
+        self.world_model = WorldModel(observation_shape=obs.shape, embed_dim=1024).to(self.device)
         
         self.world_model_optimizer = torch.optim.Adam(self.world_model.parameters(), lr=0.0001)
+
+        self.world_model_batch_size = world_model_batch_size
 
 
     
@@ -54,19 +58,49 @@ class Agent:
 
         self.frames.append(obs)
 
-        obs_stacked = torch.cat(tuple(self.frames), dim=0)
+        obs_stacked = torch.stack(list(self.frames), dim=0)
 
         return obs_stacked
 
     def train_world_model(self, epochs):
+
+        total_reward_loss = 0
         
         for i in range(epochs):
-            pass
+
+            states, actions, rewards, next_states, dones = self.memory.sample_buffer(self.world_model_batch_size)
+
+            pred_rewards = self.world_model.forward(states)
+
+            reward_loss = F.binary_cross_entropy_with_logits(rewards, pred_rewards.squeeze(-1))
+
+            self.world_model_optimizer.zero_grad()
+            reward_loss.backward()
+            self.world_model_optimizer.step()
+
+            total_reward_loss += reward_loss.item()
+
+        
+        avg_reward_loss = total_reward_loss / epochs
+
+        return avg_reward_loss
+        
+
+            # Training
+            # logits = self.reward_head(x)          # [batch, 1]
+            # loss = nn.BCEWithLogitsLoss()(logits.squeeze(-1), reward.float())
+            #
+            # # Inference - hard
+            # pred_reward = (logits.sigmoid() > 0.5).long().squeeze(-1)  # {0, 1}
+            #
+            # # Inference - soft (preferred for world model rollouts)
+            # expected_reward = logits.sigmoid().squeeze(-1)  # continuous (0, 1)
+            # pass
 
             # self.world_model.forward() 
 
 
-    def train(self, episodes=1):
+    def train(self, episodes=1, world_model_epochs=1):
 
         total_steps = 0
          
@@ -87,15 +121,18 @@ class Agent:
 
                 next_obs = self.process_observation(next_obs)
                 
-                display_stacked_obs(obs)
+                # display_stacked_obs(obs)
 
                 done = (term or trunc)
 
                 self.memory.store_transition(obs, action, reward, next_obs, done)
 
-                print(reward)
+                # self.world_model(torch.unsqueeze(obs, dim=0))
 
-                self.world_model(torch.unsqueeze(obs, dim=0))
+            reward_loss = self.train_world_model(epochs=world_model_epochs)
+
+            if episode % 100 == 0:
+                print(f"Completed episode {episode} - Reward loss: {reward_loss}")
                 # self.world_model(obs)
 
 
