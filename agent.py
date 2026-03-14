@@ -73,7 +73,7 @@ class Agent:
 
             pred_rewards = self.world_model.forward(states)
 
-            reward_loss = F.binary_cross_entropy_with_logits(rewards, pred_rewards.squeeze(-1))
+            reward_loss = F.binary_cross_entropy_with_logits(pred_rewards.squeeze(-1), rewards)
 
             self.world_model_optimizer.zero_grad()
             reward_loss.backward()
