@@ -12,7 +12,7 @@ class WorldModel(BaseModel):
         # print(observation_shape[-1])
         # conv_output_dim = 64
 
-        self.conv1 = nn.Conv2d(3, 48, kernel_size=4, stride=2, padding=1)
+        self.conv1 = nn.Conv2d(1, 48, kernel_size=4, stride=2, padding=1)
         self.conv2 = nn.Conv2d(48, 96, kernel_size=4, stride=2, padding=1)
         self.conv3 = nn.Conv2d(96, 192, kernel_size=4, stride=2, padding=1)
         self.conv4 = nn.Conv2d(192, 384, kernel_size=4, stride=2, padding=1)
@@ -28,14 +28,16 @@ class WorldModel(BaseModel):
 
         self.fc_enc = nn.Linear(self.flattened_dim, embed_dim)  # ADD THIS
 
-        self.reward_pred = nn.Linear(embed_dim, 3)
+        self.reward_pred = nn.Linear(embed_dim, 2)
 
         # self.conv3 = nn.Conv2d()
 
         print(f"VAE network initialized. Input shape: {observation_shape}")
 
+
     def get_output_shape(self):
         return self.conv_output_shape
+
 
     def _conv_features(self, x):
         # Convert uint8 to float if needed (for initialization)
@@ -46,11 +48,7 @@ class WorldModel(BaseModel):
         x = F.elu(self.conv3(x))
         x = F.elu(self.conv4(x))
 
-        x = torch.flatten(x)
-        x = self.fc_enc(x)
-        
-        reward_pred = self.reward_pred(x)
-        return reward_pred  # (B, C_enc, H_enc, W_enc)
+        return x  # (B, C_enc, H_enc, W_enc)
 
     def _conv_forward(self, x):
         x = self._conv_features(x)
@@ -61,7 +59,9 @@ class WorldModel(BaseModel):
         # x: (B,3,H,W) in [0,1]
         x = self._conv_forward(x)
         x = self.fc_enc(x)
-        return x
+
+        reward_pred = self.reward_pred(x)
+        return reward_pred 
     
 
 
