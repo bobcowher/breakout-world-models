@@ -7,6 +7,8 @@ from utils import display_stacked_obs
 from models.world_model import WorldModel
 import cv2
 import torch.nn.functional as F
+from torch.utils.tensorboard.writer import SummaryWriter
+import datetime
 
 class Agent:
 
@@ -33,7 +35,6 @@ class Agent:
         self.world_model_optimizer = torch.optim.Adam(self.world_model.parameters(), lr=0.0001)
 
         self.world_model_batch_size = world_model_batch_size
-
 
     
     def init_frame_stack(self, obs):
@@ -100,7 +101,12 @@ class Agent:
             # self.world_model.forward() 
 
 
-    def train(self, episodes=1, world_model_epochs=1):
+    def train(self, episodes=1, world_model_epochs=1, summary_writer_suffix="_wm"):
+
+        summary_writer_name = f'runs/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}_{summary_writer_suffix}'
+
+        writer = SummaryWriter(summary_writer_name)
+        
 
         total_steps = 0
          
@@ -130,6 +136,8 @@ class Agent:
                 # self.world_model(torch.unsqueeze(obs, dim=0))
 
             reward_loss = self.train_world_model(epochs=world_model_epochs)
+
+            writer.add_scalar("Stats/world_model_loss", reward_loss, episode)
 
             if episode % 100 == 0:
                 print(f"Completed episode {episode} - Reward loss: {reward_loss}")
