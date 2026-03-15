@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from torch.utils.tensorboard.writer import SummaryWriter
 import datetime
 import random
+from models.perceptual_loss import PerceptualLoss
 
 class Agent:
 
@@ -37,6 +38,8 @@ class Agent:
         self.world_model_optimizer = torch.optim.Adam(self.world_model.parameters(), lr=0.0001)
 
         self.world_model_batch_size = world_model_batch_size
+
+        self.next_frame_loss = PerceptualLoss().to(self.device)
 
     
     def init_frame_stack(self, obs):
@@ -85,7 +88,8 @@ class Agent:
 
             reward_loss = F.binary_cross_entropy_with_logits(pred_rewards.squeeze(-1), rewards)
 
-            next_frame_loss = F.l1_loss(pred_next_frame, next_obs_normalized)
+            # next_frame_loss = F.l1_loss(pred_next_frame, next_obs_normalized)
+            next_frame_loss = self.next_frame_loss(pred_next_frame, next_obs_normalized)
 
             combined_loss = reward_loss + next_frame_loss
 

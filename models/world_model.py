@@ -38,6 +38,7 @@ class WorldModel(BaseModel):
 
         self.reward_pred = nn.Linear(embed_dim, 1)
 
+
         # self.conv3 = nn.Conv2d()
 
         print(f"VAE network initialized. Input shape: {observation_shape}")
