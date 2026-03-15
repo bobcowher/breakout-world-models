@@ -2,6 +2,7 @@ import gymnasium as gym
 from collections import deque
 import time
 import torch
+from torch.cuda import device_count
 from buffer import ReplayBuffer
 from utils import display_stacked_obs
 from models.world_model import WorldModel
@@ -9,6 +10,7 @@ import cv2
 import torch.nn.functional as F
 from torch.utils.tensorboard.writer import SummaryWriter
 import datetime
+import random
 
 class Agent:
 
@@ -43,6 +45,9 @@ class Agent:
         for _ in range(self.frame_stack):
             self.frames.append(obs)
 
+    def normalize_observation(self, obs):
+        return obs / 255.0
+
     def process_observation(self, obs, clear_stack=False):
         # obs = torch.tensor(obs, dtype=torch.float32).permute(2,0,1)  
 
@@ -73,10 +78,10 @@ class Agent:
 
             obs, actions, rewards, next_obs, dones = self.memory.sample_buffer(self.world_model_batch_size)
 
-            next_obs_normalized = next_obs / 255.0 
-            obs_normalized = obs / 255.0
+            next_obs_normalized = self.normalize_observation(next_obs) 
+            obs_normalized = self.normalize_observation(obs)
 
-            pred_next_frame, pred_rewards = self.world_model.forward(obs)
+            pred_next_frame, pred_rewards = self.world_model.forward(obs_normalized)
 
             reward_loss = F.binary_cross_entropy_with_logits(pred_rewards.squeeze(-1), rewards)
 
@@ -152,6 +157,17 @@ class Agent:
 
                 obs = next_obs
 
+                if(random.random() < 0.01):
+                    with torch.no_grad():
+                        obs_for_logging = obs.unsqueeze(dim=0).to(self.device)
+                        obs_for_logging = self.normalize_observation(obs_for_logging)
+                        pred_next_frame, _ = self.world_model.forward(obs_for_logging)
+                        display_stacked_obs([
+                            ("predicted", pred_next_frame.cpu().detach()),
+                            ("actual",    obs_for_logging.cpu().detach()),
+                        ], "next_frame_pred.png")
+
+
             combined_loss, reward_loss, next_frame_loss = self.train_world_model(epochs=world_model_epochs)
 
             writer.add_scalar("World Model/combined_loss", combined_loss, episode)
@@ -160,6 +176,8 @@ class Agent:
 
             if episode % 100 == 0:
                 print(f"Completed episode {episode} - Reward loss: {reward_loss}")
+
+
                 # self.world_model(obs)
 
 
