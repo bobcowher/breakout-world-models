@@ -8,8 +8,9 @@
     - Action
 - Produces:
     - Next frame
-    - Next reward
-    - Next action
+    - Reward
+    <!-- - Next action -->
+    - Done
 
 ### q-learning 
 

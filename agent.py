@@ -66,25 +66,42 @@ class Agent:
     def train_world_model(self, epochs):
 
         total_reward_loss = 0
+        total_next_frame_loss = 0
+        total_combined_loss = 0
         
         for i in range(epochs):
 
-            states, actions, rewards, next_states, dones = self.memory.sample_buffer(self.world_model_batch_size)
+            obs, actions, rewards, next_obs, dones = self.memory.sample_buffer(self.world_model_batch_size)
 
-            pred_rewards = self.world_model.forward(states)
+            next_obs_normalized = next_obs / 255.0 
+            obs_normalized = obs / 255.0
+
+            pred_next_frame, pred_rewards = self.world_model.forward(obs)
 
             reward_loss = F.binary_cross_entropy_with_logits(pred_rewards.squeeze(-1), rewards)
 
+            print(f"Last frame shape {obs_normalized.shape}")
+            print(f"Next frame shape {pred_next_frame.shape}")
+            print(f"Next obs shape {next_obs_normalized.shape}")
+
+            next_frame_loss = F.l1_loss(pred_next_frame, next_obs_normalized)
+
+            combined_loss = reward_loss + next_frame_loss
+
             self.world_model_optimizer.zero_grad()
-            reward_loss.backward()
+            combined_loss.backward()
             self.world_model_optimizer.step()
 
+            # Just for stats.
             total_reward_loss += reward_loss.item()
-
+            total_next_frame_loss += next_frame_loss.item()
+            total_combined_loss += combined_loss.item() 
         
         avg_reward_loss = total_reward_loss / epochs
+        avg_next_frame_loss = total_next_frame_loss / epochs
+        avg_combined_loss = total_combined_loss / epochs
 
-        return avg_reward_loss
+        return avg_combined_loss, avg_reward_loss, avg_next_frame_loss
         
 
             # Training
@@ -106,7 +123,6 @@ class Agent:
         summary_writer_name = f'runs/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}_{summary_writer_suffix}'
 
         writer = SummaryWriter(summary_writer_name)
-        
 
         total_steps = 0
          
@@ -135,9 +151,11 @@ class Agent:
 
                 # self.world_model(torch.unsqueeze(obs, dim=0))
 
-            reward_loss = self.train_world_model(epochs=world_model_epochs)
+            combined_loss, reward_loss, next_frame_loss = self.train_world_model(epochs=world_model_epochs)
 
-            writer.add_scalar("Stats/world_model_loss", reward_loss, episode)
+            writer.add_scalar("World Model/combined_loss", combined_loss, episode)
+            writer.add_scalar("World Model/reward_loss", reward_loss, episode)
+            writer.add_scalar("World Model/next_frame_loss", next_frame_loss, episode)
 
             if episode % 100 == 0:
                 print(f"Completed episode {episode} - Reward loss: {reward_loss}")

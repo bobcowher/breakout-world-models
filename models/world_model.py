@@ -18,6 +18,7 @@ class WorldModel(BaseModel):
         self.conv4 = nn.Conv2d(192, 384, kernel_size=4, stride=2, padding=1)
 
         self.flatten = torch.nn.Flatten()
+        
 
         with torch.no_grad():
             dummy = torch.zeros(1, *observation_shape, dtype=torch.uint8)
@@ -27,6 +28,13 @@ class WorldModel(BaseModel):
             print(f"Conv output shape: {feats.shape}, flattened dim: {self.flattened_dim}")
 
         self.fc_enc = nn.Linear(self.flattened_dim, embed_dim)  # ADD THIS
+
+        self.deconv1 = nn.ConvTranspose2d(384, 192, kernel_size=4, stride=2, padding=1)
+        self.deconv2 = nn.ConvTranspose2d(192, 96, kernel_size=4, stride=2, padding=1)
+        self.deconv3 = nn.ConvTranspose2d(96, 48, kernel_size=4, stride=2, padding=1)
+        self.deconv4 = nn.ConvTranspose2d(48, observation_shape[0], kernel_size=4, stride=2, padding=1)
+
+        self.fc_dec = nn.Linear(embed_dim, self.flattened_dim) 
 
         self.reward_pred = nn.Linear(embed_dim, 1)
 
@@ -54,34 +62,7 @@ class WorldModel(BaseModel):
         x = self._conv_features(x)
         x = self.flatten(x)
         return x
-        
-    def forward(self, x):
-        # x: (B,3,H,W) in [0,1]
-        x = self._conv_forward(x)
-        x = self.fc_enc(x)
 
-        reward_pred = self.reward_pred(x)
-        return reward_pred 
-    
-
-
-class Decoder(BaseModel):
-
-    def __init__(self, observation_shape, embed_dim, conv_output_shape=[]):
-        super().__init__()
-        
-        # Calculate the required output size dynamically
-        self.conv_output_shape = (384, 4, 4)
-        conv_flat_size = 384 * 4 * 4  # 4096
-        
-        self.fc_dec = nn.Linear(embed_dim, conv_flat_size) 
-
-        self.deconv1 = nn.ConvTranspose2d(384, 192, kernel_size=4, stride=2, padding=1)
-        self.deconv2 = nn.ConvTranspose2d(192, 96, kernel_size=4, stride=2, padding=1)
-        self.deconv3 = nn.ConvTranspose2d(96, 48, kernel_size=4, stride=2, padding=1)
-        self.deconv4 = nn.ConvTranspose2d(48, observation_shape[0], kernel_size=4, stride=2, padding=1)
-
-    
     def _deconv_forward(self, x):
         x = x.view(-1, *self.conv_output_shape)
         x = F.elu(self.deconv1(x))
@@ -90,11 +71,20 @@ class Decoder(BaseModel):
         x = F.elu(self.deconv4(x))
        
         return x
-
+        
     def forward(self, x):
-        x = self.fc_dec(x)
-        x = self._deconv_forward(x)
-        x = torch.sigmoid(x)
-        return x
+        # x: (B,3,H,W) in [0,1]
+        x = self._conv_forward(x)
+        x = self.fc_enc(x)
+
+        reward_pred = self.reward_pred(x)
+
+        next_frame_pred = self.fc_dec(x)
+        next_frame_pred = self._deconv_forward(next_frame_pred)
+        next_frame_pred = torch.sigmoid(x)
+        
+        return next_frame_pred, reward_pred 
+    
+
 
 
