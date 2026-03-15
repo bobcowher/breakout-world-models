@@ -81,7 +81,7 @@ class WorldModel(BaseModel):
 
         next_frame_pred = self.fc_dec(x)
         next_frame_pred = self._deconv_forward(next_frame_pred)
-        next_frame_pred = torch.sigmoid(x)
+        next_frame_pred = torch.sigmoid(next_frame_pred)
         
         return next_frame_pred, reward_pred 
     

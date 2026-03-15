@@ -80,10 +80,6 @@ class Agent:
 
             reward_loss = F.binary_cross_entropy_with_logits(pred_rewards.squeeze(-1), rewards)
 
-            print(f"Last frame shape {obs_normalized.shape}")
-            print(f"Next frame shape {pred_next_frame.shape}")
-            print(f"Next obs shape {next_obs_normalized.shape}")
-
             next_frame_loss = F.l1_loss(pred_next_frame, next_obs_normalized)
 
             combined_loss = reward_loss + next_frame_loss
@@ -143,13 +139,18 @@ class Agent:
 
                 next_obs = self.process_observation(next_obs)
                 
+
+                # print(f"Obs shape {obs.shape}")
+                # print(f"Next obs shape {next_obs.shape}")
+
+                
                 # display_stacked_obs(obs)
 
                 done = (term or trunc)
 
                 self.memory.store_transition(obs, action, reward, next_obs, done)
 
-                # self.world_model(torch.unsqueeze(obs, dim=0))
+                obs = next_obs
 
             combined_loss, reward_loss, next_frame_loss = self.train_world_model(epochs=world_model_epochs)
 
