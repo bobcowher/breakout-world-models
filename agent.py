@@ -6,6 +6,7 @@ from torch.cuda import device_count
 from buffer import ReplayBuffer
 from utils import display_stacked_obs
 from models.world_model import WorldModel
+from models.q_model import QModel
 import cv2
 import torch.nn.functional as F
 from torch.utils.tensorboard.writer import SummaryWriter
@@ -17,7 +18,8 @@ class Agent:
 
     def __init__(self, env : gym.Env,
                        max_buffer_size : int = 10000,
-                       world_model_batch_size = 8) -> None:
+                       world_model_batch_size = 8,
+                       target_update_interval = 10000) -> None:
         self.env = env
         self.frame_stack = 4
         self.frames = deque(maxlen=self.frame_stack)
@@ -35,11 +37,27 @@ class Agent:
 
         self.world_model = WorldModel(observation_shape=obs.shape, embed_dim=1024).to(self.device)
         
+        print(f"Observation shape: {obs.shape}")
+
+        
         self.world_model_optimizer = torch.optim.Adam(self.world_model.parameters(), lr=0.0001)
 
         self.world_model_batch_size = world_model_batch_size
 
         self.next_frame_loss = PerceptualLoss().to(self.device)
+
+        self.q_model = QModel(action_dim=self.env.action_space.n, hidden_dim=256, observation_shape=tuple(obs.shape), obs_stack=self.frame_stack) 
+        self.target_q_model = QModel(action_dim=self.env.action_space.n, hidden_dim=256, observation_shape=tuple(obs.shape), obs_stack=self.frame_stack) 
+
+        self.q_model_optimizer = torch.optim.Adam(self.q_model.parameters(), lr=0.0001)
+
+        self.target_update_interval = target_update_interval
+
+        self.gamma = 0.99
+
+        self.epsilon = 1
+        self.min_epsilon = 0.1
+        self.epsilon_decay = 0.995
 
     
     def init_frame_stack(self, obs):
@@ -122,6 +140,39 @@ class Agent:
 
             # self.world_model.forward() 
 
+    def train_q_model_live(self, batch_size, total_steps):
+
+        if self.memory.can_sample(batch_size):
+
+            observations, actions, rewards, next_observations, dones = self.memory.sample_buffer(batch_size)
+
+            actions = actions.unsqueeze(1).long()
+            rewards = rewards.unsqueeze(1)
+            dones = dones.unsqueeze(1).float()
+
+            q_values = self.q_model(observations)
+            q_sa     = q_values.gather(1, actions)
+
+            with torch.no_grad():
+                next_actions = torch.argmax(
+                    self.q_model(next_observations), dim=1, keepdim=True
+                )
+
+                next_q = self.target_q_model(next_observations).gather(1, next_actions)
+                targets = rewards + (1 - dones) * self.gamma * next_q
+
+            loss = F.mse_loss(q_sa, targets)
+
+            self.q_model_optimizer.zero_grad()
+            loss.backward()
+            self.q_model_optimizer.step()
+
+            if total_steps % self.target_update_interval == 0:
+                self.target_q_model.load_state_dict(self.q_model.state_dict())
+
+        return loss.item()
+
+
 
     def train(self, episodes=1, world_model_epochs=1, summary_writer_suffix="_wm"):
 
@@ -172,15 +223,15 @@ class Agent:
                         ], "next_frame_pred.png")
 
 
-            combined_loss, reward_loss, next_frame_loss = self.train_world_model(epochs=world_model_epochs)
-
-            writer.add_scalar("World Model/combined_loss", combined_loss, episode)
-            writer.add_scalar("World Model/reward_loss", reward_loss, episode)
-            writer.add_scalar("World Model/next_frame_loss", next_frame_loss, episode)
-
-            if episode % 100 == 0:
-                print(f"Completed episode {episode} - Reward loss: {reward_loss}")
-
+            # combined_loss, reward_loss, next_frame_loss = self.train_world_model(epochs=world_model_epochs)
+            #
+            # writer.add_scalar("World Model/combined_loss", combined_loss, episode)
+            # writer.add_scalar("World Model/reward_loss", reward_loss, episode)
+            # writer.add_scalar("World Model/next_frame_loss", next_frame_loss, episode)
+            #
+            # if episode % 100 == 0:
+            #     print(f"Completed episode {episode} - Reward loss: {reward_loss}")
+            #
 
                 # self.world_model(obs)
 

@@ -1,10 +1,11 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from models.base import BaseModel
 
-class Model(BaseModel):
+class QModel(BaseModel):
     def __init__(self, action_dim, hidden_dim=256, observation_shape=None, obs_stack=4):
-        super(Model, self).__init__()
+        super(QModel, self).__init__()
 
         # CNN layers with a third layer added
         self.conv1 = nn.Conv2d(in_channels=obs_stack, out_channels=32, kernel_size=8, stride=4)
