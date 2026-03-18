@@ -72,7 +72,7 @@ class Agent:
     def process_observation(self, obs, clear_stack=False):
         # obs = torch.tensor(obs, dtype=torch.float32).permute(2,0,1)  
 
-        obs = cv2.resize(obs, (84, 84), interpolation=cv2.INTER_NEAREST) # shrink to 128
+        obs = cv2.resize(obs, (96, 96), interpolation=cv2.INTER_NEAREST) # shrink to 128
         obs = cv2.cvtColor(obs, cv2.COLOR_RGB2GRAY) # let's do grayscale    
         # obs = torch.from_numpy(obs).permute(2, 0, 1).to(self.device)
         obs = torch.from_numpy(obs)
