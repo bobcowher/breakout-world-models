@@ -12,7 +12,7 @@ class PerceptualLoss(nn.Module):
 
     def __init__(self):
         super().__init__()
-        vgg = models.vgg16(weights=models.VGG16_Weights.DEFAULT).features
+        vgg: nn.Sequential = models.vgg16(weights=models.VGG16_Weights.DEFAULT).features  # type: ignore[assignment]
         self.blocks = nn.ModuleList([
             vgg[:4],   # relu1_2
             vgg[4:9],  # relu2_2
