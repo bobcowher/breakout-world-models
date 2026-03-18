@@ -46,8 +46,8 @@ class Agent:
 
         self.next_frame_loss = PerceptualLoss().to(self.device)
 
-        self.q_model = QModel(action_dim=self.env.action_space.n, hidden_dim=256, observation_shape=tuple(obs.shape), obs_stack=self.frame_stack) 
-        self.target_q_model = QModel(action_dim=self.env.action_space.n, hidden_dim=256, observation_shape=tuple(obs.shape), obs_stack=self.frame_stack) 
+        self.q_model = QModel(action_dim=self.env.action_space.n, hidden_dim=256, observation_shape=tuple(obs.shape), obs_stack=self.frame_stack).to(self.device)
+        self.target_q_model = QModel(action_dim=self.env.action_space.n, hidden_dim=256, observation_shape=tuple(obs.shape), obs_stack=self.frame_stack).to(self.device)
 
         self.q_model_optimizer = torch.optim.Adam(self.q_model.parameters(), lr=0.0001)
 
@@ -58,7 +58,7 @@ class Agent:
         self.epsilon = 1
         self.min_epsilon = 0.1
         self.epsilon_decay = 0.995
-
+        self.total_steps = 0
     
     def init_frame_stack(self, obs):
         """Call once after env.reset().  Pre-fill both deques."""
@@ -174,14 +174,12 @@ class Agent:
 
 
 
-    def train(self, episodes=1, world_model_epochs=1, summary_writer_suffix="_wm"):
+    def train(self, episodes=1, world_model_epochs=1, summary_writer_suffix="_wm", batch_size=32):
 
         summary_writer_name = f'runs/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}_{summary_writer_suffix}'
 
         writer = SummaryWriter(summary_writer_name)
 
-        total_steps = 0
-         
         for episode in range(episodes):
             
             obs, info = self.env.reset()
@@ -189,26 +187,33 @@ class Agent:
             obs = self.process_observation(obs, clear_stack=True)
 
             done = False
-            episode_step = 0
+            episode_reward = 0.0
+            episode_loss = 0.0
+            episode_steps = 0
 
             while not done:
 
-                action = self.env.action_space.sample()
+                if random.random() < self.epsilon:
+                    action = self.env.action_space.sample()
+                else:
+                    with torch.no_grad():
+                        obs_t = obs.unsqueeze(0).float().to(self.device)
+                        action = self.q_model(obs_t).argmax(dim=1).item()
 
                 next_obs, reward, term, trunc, info = self.env.step(action)
 
                 next_obs = self.process_observation(next_obs)
-                
-
-                # print(f"Obs shape {obs.shape}")
-                # print(f"Next obs shape {next_obs.shape}")
-
-                
-                # display_stacked_obs(obs)
 
                 done = (term or trunc)
 
                 self.memory.store_transition(obs, action, reward, next_obs, done)
+
+                self.total_steps += 1
+                episode_reward += reward
+                episode_steps += 1
+
+                if self.memory.can_sample(batch_size):
+                    episode_loss += self.train_q_model_live(batch_size, self.total_steps)
 
                 obs = next_obs
 
@@ -221,6 +226,16 @@ class Agent:
                             ("predicted", pred_next_frame.cpu().detach()),
                             ("actual",    obs_for_logging.cpu().detach()),
                         ], "next_frame_pred.png")
+
+            self.epsilon = max(self.min_epsilon, self.epsilon * self.epsilon_decay)
+
+            writer.add_scalar("Train/episode_reward", episode_reward, episode)
+            writer.add_scalar("Train/epsilon", self.epsilon, episode)
+            if episode_steps > 0:
+                writer.add_scalar("Train/avg_q_loss", episode_loss / episode_steps, episode)
+
+            print(f"Episode {episode} | reward: {episode_reward:.1f} | epsilon: {self.epsilon:.3f} | steps: {episode_steps}")
+
 
 
             # combined_loss, reward_loss, next_frame_loss = self.train_world_model(epochs=world_model_epochs)
