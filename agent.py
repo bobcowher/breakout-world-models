@@ -31,8 +31,6 @@ class Agent:
 
         obs = self.process_observation(obs)
 
-        self.max_episode_steps = 500
-
         self.memory = ReplayBuffer(max_size=max_buffer_size, input_shape=obs.shape, n_actions=self.env.action_space.n, input_device=self.device, output_device=self.device)
 
         # print(torch.squeeze(obs).shape)
@@ -122,6 +120,8 @@ class Agent:
     def train_world_model(self, epochs):
 
         total_reward_loss = 0
+        total_action_loss = 0
+        total_done_loss = 0
         total_next_frame_loss = 0
         total_combined_loss = 0
         
@@ -149,14 +149,18 @@ class Agent:
 
             # Just for stats.
             total_reward_loss += reward_loss.item()
+            total_action_loss += action_loss.item()
+            total_done_loss += done_loss.item()
             total_next_frame_loss += next_frame_loss.item()
-            total_combined_loss += combined_loss.item() 
-        
-        avg_reward_loss = total_reward_loss / epochs
-        avg_next_frame_loss = total_next_frame_loss / epochs
-        avg_combined_loss = total_combined_loss / epochs
+            total_combined_loss += combined_loss.item()
 
-        return avg_combined_loss, avg_reward_loss, avg_next_frame_loss
+        avg_combined_loss    = total_combined_loss / epochs
+        avg_reward_loss      = total_reward_loss / epochs
+        avg_action_loss      = total_action_loss / epochs
+        avg_done_loss        = total_done_loss / epochs
+        avg_next_frame_loss  = total_next_frame_loss / epochs
+
+        return avg_combined_loss, avg_reward_loss, avg_action_loss, avg_done_loss, avg_next_frame_loss
         
 
             # Training
@@ -172,7 +176,7 @@ class Agent:
 
             # self.world_model.forward() 
 
-    def train_q_model_live(self, batch_size, total_steps):
+    def train_q_model_step_live(self, batch_size):
 
         if self.memory.can_sample(batch_size):
 
@@ -199,47 +203,95 @@ class Agent:
             loss.backward()
             self.q_model_optimizer.step()
 
-            if total_steps % self.target_update_interval == 0:
+            if self.total_steps % self.target_update_interval == 0:
                 self.target_q_model.load_state_dict(self.q_model.state_dict())
 
+            self.total_steps += 1
+
         return loss.item()
 
 
-    def train_q_model_on_imagination(self, batch_size, total_steps):
+    def train_q_model_on_imagination(self, batch_size, epochs=100):
+
+        total_loss = 0
         
-        seed_obs, _, _, _, dones = self.memory.sample_buffer(1)
+        for epoch in range(epochs):
 
-        observations, actions, rewards, next_observations, dones = self.imagine_trajectory(seed_obs, batch_size)
+            seed_obs, _, _, _, dones = self.memory.sample_buffer(1)
 
-        actions = actions.unsqueeze(1).long()
-        rewards = rewards.unsqueeze(1)
-        dones = dones.unsqueeze(1).float()
+            observations, actions, rewards, next_observations, dones = self.imagine_trajectory(seed_obs, batch_size)
 
-        q_values = self.q_model(observations)
-        q_sa     = q_values.gather(1, actions)
+            actions = actions.unsqueeze(1).long()
+            rewards = rewards.unsqueeze(1)
+            dones = dones.unsqueeze(1).float()
 
-        with torch.no_grad():
-            next_actions = torch.argmax(
-                self.q_model(next_observations), dim=1, keepdim=True
-            )
+            q_values = self.q_model(observations)
+            q_sa     = q_values.gather(1, actions)
 
-            next_q = self.target_q_model(next_observations).gather(1, next_actions)
-            targets = rewards + (1 - dones) * self.gamma * next_q
+            with torch.no_grad():
+                next_actions = torch.argmax(
+                    self.q_model(next_observations), dim=1, keepdim=True
+                )
 
-        loss = F.mse_loss(q_sa, targets)
+                next_q = self.target_q_model(next_observations).gather(1, next_actions)
+                targets = rewards + (1 - dones) * self.gamma * next_q
 
-        self.q_model_optimizer.zero_grad()
-        loss.backward()
-        self.q_model_optimizer.step()
+            loss = F.mse_loss(q_sa, targets)
 
-        if total_steps % self.target_update_interval == 0:
-            self.target_q_model.load_state_dict(self.q_model.state_dict())
+            self.q_model_optimizer.zero_grad()
+            loss.backward()
+            self.q_model_optimizer.step()
 
-        return loss.item()
+            if self.total_steps % self.target_update_interval == 0:
+                self.target_q_model.load_state_dict(self.q_model.state_dict())
+
+            total_loss += loss.item()
+
+            self.total_steps += 1
+
+        return total_loss / epochs
 
 
 
-    def train(self, episodes=1, world_model_epochs=1, summary_writer_suffix="_wm", batch_size=32, use_world_model=False):
+    def save(self):
+        self.world_model.save_the_model("world_model", verbose=True)
+        self.q_model.save_the_model("q_model", verbose=True)
+
+    def load(self):
+        self.world_model.load_the_model("world_model", device=self.device)
+        self.q_model.load_the_model("q_model", device=self.device)
+        self.target_q_model.load_the_model("q_model", device=self.device)
+
+    def test(self, episodes=10):
+        self.q_model.eval()
+        total_rewards = []
+
+        for episode in range(episodes):
+            obs, _ = self.env.reset()
+            obs = self.process_observation(obs, clear_stack=True)
+            done = False
+            episode_reward = 0.0
+
+            while not done:
+                with torch.no_grad():
+                    obs_t = obs.unsqueeze(0).float().to(self.device)
+                    action = self.q_model(obs_t).argmax(dim=1).item()
+
+                next_obs, reward, term, trunc, _ = self.env.step(action)
+                next_obs = self.process_observation(next_obs)
+                done = term or trunc
+                episode_reward += reward
+                obs = next_obs
+
+            total_rewards.append(episode_reward)
+            print(f"Test episode {episode} | reward: {episode_reward:.1f}")
+
+        avg = sum(total_rewards) / len(total_rewards)
+        print(f"Average reward over {episodes} episodes: {avg:.1f}")
+        self.q_model.train()
+        return total_rewards
+
+    def train(self, episodes=1, world_model_epochs=1, q_model_epochs=1, summary_writer_suffix="_wm", batch_size=32, use_world_model=False):
 
         summary_writer_name = f'runs/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}_{summary_writer_suffix}'
 
@@ -273,17 +325,12 @@ class Agent:
 
                 self.memory.store_transition(obs, action, reward, next_obs, done)
 
-                self.total_steps += 1
                 episode_reward += reward
                 episode_steps += 1
 
-
-                if self.memory.can_sample(batch_size):
-                    if use_world_model:
-                        episode_loss += self.train_q_model_on_imagination(batch_size, self.total_steps)
-                    else:
-                        episode_loss += self.train_q_model_live(batch_size, self.total_steps)
-                
+                # Do live training, if we're not using the world model.
+                if self.memory.can_sample(batch_size) and not use_world_model:
+                        episode_loss += self.train_q_model_step_live(batch_size)
 
                 obs = next_obs
 
@@ -297,33 +344,39 @@ class Agent:
                             ("actual",    obs_for_logging.cpu().detach()),
                         ], "next_frame_pred.png")
 
+
+            # Adjust epsilon. 
             self.epsilon = max(self.min_epsilon, self.epsilon * self.epsilon_decay)
 
-            writer.add_scalar("Train/episode_reward", episode_reward, episode)
-            writer.add_scalar("Train/epsilon", self.epsilon, episode)
-
-            if episode_steps > 0 and not use_world_model:
-                writer.add_scalar("Train/avg_q_loss", episode_loss / episode_steps, episode)
-
+            # Log stats for the current training iteration 
             print(f"Episode {episode} | reward: {episode_reward:.1f} | epsilon: {self.epsilon:.3f} | steps: {episode_steps}")
 
-
             if use_world_model:
-                combined_loss, reward_loss, next_frame_loss = self.train_world_model(epochs=world_model_epochs)
+                combined_loss, reward_loss, action_loss, done_loss, next_frame_loss = self.train_world_model(epochs=world_model_epochs)
+
+                if episode > 5:
+                    episode_loss += self.train_q_model_on_imagination(batch_size, epochs=q_model_epochs)
 
                 writer.add_scalar("World Model/combined_loss", combined_loss, episode)
                 writer.add_scalar("World Model/reward_loss", reward_loss, episode)
+                writer.add_scalar("World Model/action_loss", action_loss, episode)
+                writer.add_scalar("World Model/done_loss", done_loss, episode)
                 writer.add_scalar("World Model/next_frame_loss", next_frame_loss, episode)
 
                 if episode % 100 == 0:
                     print(f"Completed episode {episode} - Reward loss: {reward_loss}")
 
-        self.memory.print_stats()
+            writer.add_scalar("Train/episode_reward", episode_reward, episode)
+            writer.add_scalar("Train/epsilon", self.epsilon, episode)
 
+            if episode_steps > 0:
+                # If we're doing live training, we need to divide by episode steps
+                episode_loss = episode_loss if use_world_model else episode_loss / episode_steps
+                writer.add_scalar("Train/avg_q_loss", episode_loss, episode)
+            
+            if episode % 10 == 0:
+                self.save()
 
-                # time.sleep(0.01)
-
-                
 
 
 
