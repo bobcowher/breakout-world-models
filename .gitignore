@@ -2,5 +2,6 @@ __pycache__
 nohup.out
 runs/
 CLAUDE.md
+CONTEXT.md
 checkpoints
 *.png

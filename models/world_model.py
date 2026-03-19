@@ -6,7 +6,7 @@ from models.base import BaseModel
 
 class WorldModel(BaseModel):
 
-    def __init__(self, observation_shape=(), embed_dim=1024, n_actions=4):
+    def __init__(self, observation_shape=(), embed_dim=1024, action_dim=128, n_actions=4):
         super().__init__()
 
         # print(observation_shape[-1])
@@ -16,6 +16,8 @@ class WorldModel(BaseModel):
         self.conv2 = nn.Conv2d(48, 96, kernel_size=4, stride=2, padding=1)
         self.conv3 = nn.Conv2d(96, 192, kernel_size=4, stride=2, padding=1)
         self.conv4 = nn.Conv2d(192, 384, kernel_size=4, stride=2, padding=1)
+
+        self.action_input = nn.Linear(n_actions, action_dim)
 
         self.flatten = torch.nn.Flatten()
         
@@ -34,11 +36,11 @@ class WorldModel(BaseModel):
         self.deconv3 = nn.ConvTranspose2d(96, 48, kernel_size=4, stride=2, padding=1)
         self.deconv4 = nn.ConvTranspose2d(48, observation_shape[0], kernel_size=4, stride=2, padding=1)
 
-        self.fc_dec = nn.Linear(embed_dim, self.flattened_dim) 
+        self.fc_dec = nn.Linear(embed_dim + action_dim, self.flattened_dim) 
 
-        self.reward_pred = nn.Linear(embed_dim, 1)
-        self.action_pred = nn.Linear(embed_dim, n_actions)
-        self.done_pred = nn.Linear(embed_dim, 1)
+        self.reward_pred = nn.Linear(embed_dim + action_dim, 1)
+        self.action_pred = nn.Linear(embed_dim + action_dim, n_actions)
+        self.done_pred = nn.Linear(embed_dim + action_dim, 1)
 
 
         # self.conv3 = nn.Conv2d()
@@ -75,10 +77,13 @@ class WorldModel(BaseModel):
        
         return x
         
-    def forward(self, x):
+    def forward(self, obs, action):
         # x: (B,3,H,W) in [0,1]
-        x = self._conv_forward(x)
+        x = self._conv_forward(obs)
         x = self.fc_enc(x)
+        y = self.action_input(action)
+
+        x = torch.cat([x, y], dim=1)
 
         reward_pred = self.reward_pred(x)
         action_pred = self.action_pred(x)

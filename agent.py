@@ -98,16 +98,24 @@ class Agent:
         next_states = torch.zeros(batch_size, *obs_shape)
         dones       = torch.zeros(batch_size)
 
+        obs_normalized = self.normalize_observation(obs)
+
         for i in range(batch_size):
-            next_obs, reward, action, done = self.world_model(obs)
+            # Select action using Q model
+            with torch.no_grad():
+                q_values = self.q_model(obs_normalized)
+                action_idx = q_values.argmax(dim=1)
+                action_onehot = F.one_hot(action_idx, num_classes=self.env.action_space.n).float()
+
+            next_obs, reward, pred_action, done = self.world_model(obs_normalized, action_onehot)
 
             states[i]      = obs.squeeze(0)
-            actions[i]     = action.argmax(dim=1).item()
+            actions[i]     = action_idx.item()
             rewards[i]     = reward.item()
             next_states[i] = next_obs.squeeze(0)
             dones[i]       = (torch.sigmoid(done) > 0.5).float().item()
 
-            obs = next_obs
+            obs_normalized = next_obs
 
         states      = states.to(self.device)
         actions     = actions.to(self.device)
@@ -129,10 +137,13 @@ class Agent:
 
             obs, actions, rewards, next_obs, dones = self.memory.sample_buffer(self.world_model_batch_size)
 
-            next_obs_normalized = self.normalize_observation(next_obs) 
+            next_obs_normalized = self.normalize_observation(next_obs)
             obs_normalized = self.normalize_observation(obs)
 
-            pred_next_frame, pred_rewards, pred_actions, pred_dones = self.world_model.forward(obs_normalized)
+            # One-hot encode actions for world model input
+            actions_onehot = F.one_hot(actions.long(), num_classes=self.env.action_space.n).float()
+
+            pred_next_frame, pred_rewards, pred_actions, pred_dones = self.world_model.forward(obs_normalized, actions_onehot)
 
             reward_loss = F.binary_cross_entropy_with_logits(pred_rewards.squeeze(-1), rewards)
             action_loss = F.cross_entropy(pred_actions, actions.long())
@@ -342,7 +353,8 @@ class Agent:
                     with torch.no_grad():
                         obs_for_logging = obs.unsqueeze(dim=0).to(self.device)
                         obs_for_logging = self.normalize_observation(obs_for_logging)
-                        pred_next_frame, _, _, _ = self.world_model.forward(obs_for_logging)
+                        action_onehot = F.one_hot(torch.tensor([action], device=self.device), num_classes=self.env.action_space.n).float()
+                        pred_next_frame, _, _, _ = self.world_model.forward(obs_for_logging, action_onehot)
                         display_stacked_obs([
                             ("predicted", pred_next_frame.cpu().detach()),
                             ("actual",    obs_for_logging.cpu().detach()),
