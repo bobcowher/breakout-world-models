@@ -293,7 +293,11 @@ class Agent:
 
     def train(self, episodes=1, world_model_epochs=1, q_model_epochs=1, summary_writer_suffix="_wm", batch_size=32, use_world_model=False):
 
-        summary_writer_name = f'runs/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}_{summary_writer_suffix}'
+        if use_world_model:
+            run_tag = f'world_model_wme{world_model_epochs}_qe{q_model_epochs}_bs{batch_size}'
+        else:
+            run_tag = f'live_bs{batch_size}'
+        summary_writer_name = f'runs/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}_{run_tag}'
 
         writer = SummaryWriter(summary_writer_name)
 
