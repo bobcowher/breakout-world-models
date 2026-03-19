@@ -2,6 +2,7 @@ import gymnasium as gym
 from collections import deque
 import time
 import torch
+from torch._dynamo.utils import torchscript
 from torch.cuda import device_count
 from buffer import ReplayBuffer
 from utils import display_stacked_obs
@@ -36,7 +37,7 @@ class Agent:
 
         # print(torch.squeeze(obs).shape)
 
-        self.world_model = WorldModel(observation_shape=obs.shape, embed_dim=1024).to(self.device)
+        self.world_model = WorldModel(observation_shape=obs.shape, embed_dim=1024, n_actions=self.env.action_space.n).to(self.device)
         
         print(f"Observation shape: {obs.shape}")
 
@@ -92,24 +93,29 @@ class Agent:
 
 
     def imagine_trajectory(self, obs, batch_size):
-        states      = np.zeros(batch_size)
-        actions     = np.zeros(batch_size)
-        rewards     = np.zeros(batch_size)
-        next_states = np.zeros(batch_size)
-        dones       = np.zeros(batch_size)
+        obs_shape   = obs.shape[1:]  # (4, 96, 96)
+        states      = torch.zeros(batch_size, *obs_shape)
+        actions     = torch.zeros(batch_size)
+        rewards     = torch.zeros(batch_size)
+        next_states = torch.zeros(batch_size, *obs_shape)
+        dones       = torch.zeros(batch_size)
 
         for i in range(batch_size):
             next_obs, reward, action, done = self.world_model(obs)
 
-            action = action.argmax(dim=1).item()
+            states[i]      = obs.squeeze(0)
+            actions[i]     = action.argmax(dim=1).item()
+            rewards[i]     = reward.item()
+            next_states[i] = next_obs.squeeze(0)
+            dones[i]       = (torch.sigmoid(done) > 0.5).float().item()
 
-            states[i] = obs
-            actions[i] = action
-            rewards[i] = reward
-            next_states[i] = next_obs
-            dones = [i] = done
-        
-        
+            obs = next_obs
+
+        states      = states.to(self.device)
+        actions     = actions.to(self.device)
+        rewards     = rewards.to(self.device)
+        next_states = next_states.to(self.device)
+        dones       = dones.to(self.device)
 
         return states, actions, rewards, next_states, dones
 
@@ -126,14 +132,16 @@ class Agent:
             next_obs_normalized = self.normalize_observation(next_obs) 
             obs_normalized = self.normalize_observation(obs)
 
-            pred_next_frame, pred_rewards = self.world_model.forward(obs_normalized)
+            pred_next_frame, pred_rewards, pred_actions, pred_dones = self.world_model.forward(obs_normalized)
 
             reward_loss = F.binary_cross_entropy_with_logits(pred_rewards.squeeze(-1), rewards)
+            action_loss = F.cross_entropy(pred_actions, actions.long())
+            done_loss = F.binary_cross_entropy_with_logits(pred_dones.squeeze(-1), dones.float())
 
             # next_frame_loss = F.l1_loss(pred_next_frame, next_obs_normalized)
             next_frame_loss = self.next_frame_loss(pred_next_frame, next_obs_normalized)
 
-            combined_loss = reward_loss + next_frame_loss
+            combined_loss = reward_loss + action_loss + done_loss + next_frame_loss
 
             self.world_model_optimizer.zero_grad()
             combined_loss.backward()
@@ -199,37 +207,35 @@ class Agent:
 
     def train_q_model_on_imagination(self, batch_size, total_steps):
         
-        observations, actions, rewards, next_observations, dones = self.memory.sample_buffer(batch_size)
+        seed_obs, _, _, _, dones = self.memory.sample_buffer(1)
 
+        observations, actions, rewards, next_observations, dones = self.imagine_trajectory(seed_obs, batch_size)
 
-        #
-        #     actions = actions.unsqueeze(1).long()
-        #     rewards = rewards.unsqueeze(1)
-        #     dones = dones.unsqueeze(1).float()
-        #
-        #     q_values = self.q_model(observations)
-        #     q_sa     = q_values.gather(1, actions)
-        #
-        #     with torch.no_grad():
-        #         next_actions = torch.argmax(
-        #             self.q_model(next_observations), dim=1, keepdim=True
-        #         )
-        #
-        #         next_q = self.target_q_model(next_observations).gather(1, next_actions)
-        #         targets = rewards + (1 - dones) * self.gamma * next_q
-        #
-        #     loss = F.mse_loss(q_sa, targets)
-        #
-        #     self.q_model_optimizer.zero_grad()
-        #     loss.backward()
-        #     self.q_model_optimizer.step()
-        #
-        #     if total_steps % self.target_update_interval == 0:
-        #         self.target_q_model.load_state_dict(self.q_model.state_dict())
+        actions = actions.unsqueeze(1).long()
+        rewards = rewards.unsqueeze(1)
+        dones = dones.unsqueeze(1).float()
 
-        # return loss.item()
+        q_values = self.q_model(observations)
+        q_sa     = q_values.gather(1, actions)
 
-        return 0
+        with torch.no_grad():
+            next_actions = torch.argmax(
+                self.q_model(next_observations), dim=1, keepdim=True
+            )
+
+            next_q = self.target_q_model(next_observations).gather(1, next_actions)
+            targets = rewards + (1 - dones) * self.gamma * next_q
+
+        loss = F.mse_loss(q_sa, targets)
+
+        self.q_model_optimizer.zero_grad()
+        loss.backward()
+        self.q_model_optimizer.step()
+
+        if total_steps % self.target_update_interval == 0:
+            self.target_q_model.load_state_dict(self.q_model.state_dict())
+
+        return loss.item()
 
 
 
@@ -285,7 +291,7 @@ class Agent:
                     with torch.no_grad():
                         obs_for_logging = obs.unsqueeze(dim=0).to(self.device)
                         obs_for_logging = self.normalize_observation(obs_for_logging)
-                        pred_next_frame, _ = self.world_model.forward(obs_for_logging)
+                        pred_next_frame, _, _, _ = self.world_model.forward(obs_for_logging)
                         display_stacked_obs([
                             ("predicted", pred_next_frame.cpu().detach()),
                             ("actual",    obs_for_logging.cpu().detach()),
@@ -311,9 +317,6 @@ class Agent:
 
                 if episode % 100 == 0:
                     print(f"Completed episode {episode} - Reward loss: {reward_loss}")
-
-
-
 
         self.memory.print_stats()
 

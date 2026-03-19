@@ -6,7 +6,7 @@ from models.base import BaseModel
 
 class WorldModel(BaseModel):
 
-    def __init__(self, observation_shape=(), embed_dim=1024):
+    def __init__(self, observation_shape=(), embed_dim=1024, n_actions=4):
         super().__init__()
 
         # print(observation_shape[-1])
@@ -37,7 +37,8 @@ class WorldModel(BaseModel):
         self.fc_dec = nn.Linear(embed_dim, self.flattened_dim) 
 
         self.reward_pred = nn.Linear(embed_dim, 1)
-        self.action_pred = nn.Linear(embed_dim, 3)
+        self.action_pred = nn.Linear(embed_dim, n_actions)
+        self.done_pred = nn.Linear(embed_dim, 1)
 
 
         # self.conv3 = nn.Conv2d()
@@ -80,12 +81,14 @@ class WorldModel(BaseModel):
         x = self.fc_enc(x)
 
         reward_pred = self.reward_pred(x)
+        action_pred = self.action_pred(x)
+        done_pred = self.done_pred(x)
 
         next_frame_pred = self.fc_dec(x)
         next_frame_pred = self._deconv_forward(next_frame_pred)
         next_frame_pred = torch.sigmoid(next_frame_pred)
-        
-        return next_frame_pred, reward_pred 
+
+        return next_frame_pred, reward_pred, action_pred, done_pred
     
 
 
