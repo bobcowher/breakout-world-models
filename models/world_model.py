@@ -37,6 +37,7 @@ class WorldModel(BaseModel):
         self.fc_dec = nn.Linear(embed_dim, self.flattened_dim) 
 
         self.reward_pred = nn.Linear(embed_dim, 1)
+        self.action_pred = nn.Linear(embed_dim, 3)
 
 
         # self.conv3 = nn.Conv2d()

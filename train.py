@@ -8,4 +8,4 @@ env = gym.make("ALE/Breakout-v5", render_mode="rgb_array")
 
 agent = Agent(env=env, world_model_batch_size=32, max_buffer_size=20000) 
 
-agent.train(episodes=5000, world_model_epochs=100)
+agent.train(episodes=5000, world_model_epochs=100, use_world_model=True)

@@ -13,6 +13,7 @@ from torch.utils.tensorboard.writer import SummaryWriter
 import datetime
 import random
 from models.perceptual_loss import PerceptualLoss
+import numpy as np
 
 class Agent:
 
@@ -88,6 +89,29 @@ class Agent:
         obs_stacked = torch.stack(list(self.frames), dim=0)
 
         return obs_stacked
+
+
+    def imagine_trajectory(self, obs, batch_size):
+        states      = np.zeros(batch_size)
+        actions     = np.zeros(batch_size)
+        rewards     = np.zeros(batch_size)
+        next_states = np.zeros(batch_size)
+        dones       = np.zeros(batch_size)
+
+        for i in range(batch_size):
+            next_obs, reward, action, done = self.world_model(obs)
+
+            action = action.argmax(dim=1).item()
+
+            states[i] = obs
+            actions[i] = action
+            rewards[i] = reward
+            next_states[i] = next_obs
+            dones = [i] = done
+        
+        
+
+        return states, actions, rewards, next_states, dones
 
     def train_world_model(self, epochs):
 
@@ -173,8 +197,43 @@ class Agent:
         return loss.item()
 
 
+    def train_q_model_on_imagination(self, batch_size, total_steps):
+        
+        observations, actions, rewards, next_observations, dones = self.memory.sample_buffer(batch_size)
 
-    def train(self, episodes=1, world_model_epochs=1, summary_writer_suffix="_wm", batch_size=32):
+
+        #
+        #     actions = actions.unsqueeze(1).long()
+        #     rewards = rewards.unsqueeze(1)
+        #     dones = dones.unsqueeze(1).float()
+        #
+        #     q_values = self.q_model(observations)
+        #     q_sa     = q_values.gather(1, actions)
+        #
+        #     with torch.no_grad():
+        #         next_actions = torch.argmax(
+        #             self.q_model(next_observations), dim=1, keepdim=True
+        #         )
+        #
+        #         next_q = self.target_q_model(next_observations).gather(1, next_actions)
+        #         targets = rewards + (1 - dones) * self.gamma * next_q
+        #
+        #     loss = F.mse_loss(q_sa, targets)
+        #
+        #     self.q_model_optimizer.zero_grad()
+        #     loss.backward()
+        #     self.q_model_optimizer.step()
+        #
+        #     if total_steps % self.target_update_interval == 0:
+        #         self.target_q_model.load_state_dict(self.q_model.state_dict())
+
+        # return loss.item()
+
+        return 0
+
+
+
+    def train(self, episodes=1, world_model_epochs=1, summary_writer_suffix="_wm", batch_size=32, use_world_model=False):
 
         summary_writer_name = f'runs/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}_{summary_writer_suffix}'
 
@@ -212,8 +271,13 @@ class Agent:
                 episode_reward += reward
                 episode_steps += 1
 
+
                 if self.memory.can_sample(batch_size):
-                    episode_loss += self.train_q_model_live(batch_size, self.total_steps)
+                    if use_world_model:
+                        episode_loss += self.train_q_model_on_imagination(batch_size, self.total_steps)
+                    else:
+                        episode_loss += self.train_q_model_live(batch_size, self.total_steps)
+                
 
                 obs = next_obs
 
@@ -231,24 +295,24 @@ class Agent:
 
             writer.add_scalar("Train/episode_reward", episode_reward, episode)
             writer.add_scalar("Train/epsilon", self.epsilon, episode)
-            if episode_steps > 0:
+
+            if episode_steps > 0 and not use_world_model:
                 writer.add_scalar("Train/avg_q_loss", episode_loss / episode_steps, episode)
 
             print(f"Episode {episode} | reward: {episode_reward:.1f} | epsilon: {self.epsilon:.3f} | steps: {episode_steps}")
 
 
+            if use_world_model:
+                combined_loss, reward_loss, next_frame_loss = self.train_world_model(epochs=world_model_epochs)
 
-            # combined_loss, reward_loss, next_frame_loss = self.train_world_model(epochs=world_model_epochs)
-            #
-            # writer.add_scalar("World Model/combined_loss", combined_loss, episode)
-            # writer.add_scalar("World Model/reward_loss", reward_loss, episode)
-            # writer.add_scalar("World Model/next_frame_loss", next_frame_loss, episode)
-            #
-            # if episode % 100 == 0:
-            #     print(f"Completed episode {episode} - Reward loss: {reward_loss}")
-            #
+                writer.add_scalar("World Model/combined_loss", combined_loss, episode)
+                writer.add_scalar("World Model/reward_loss", reward_loss, episode)
+                writer.add_scalar("World Model/next_frame_loss", next_frame_loss, episode)
 
-                # self.world_model(obs)
+                if episode % 100 == 0:
+                    print(f"Completed episode {episode} - Reward loss: {reward_loss}")
+
+
 
 
         self.memory.print_stats()
