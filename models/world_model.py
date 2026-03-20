@@ -85,7 +85,7 @@ class WorldModel(BaseModel):
 
         x = torch.cat([x, y], dim=1)
 
-        reward_pred = self.reward_pred(x)
+        reward_pred = torch.tanh(self.reward_pred(x))  # Output in range [-1, 1]
         action_pred = self.action_pred(x)
         done_pred = self.done_pred(x)
 

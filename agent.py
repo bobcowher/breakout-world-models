@@ -162,7 +162,7 @@ class Agent:
 
             pred_next_frame, pred_rewards, pred_actions, pred_dones = self.world_model.forward(obs_normalized, actions_onehot)
 
-            reward_loss = F.binary_cross_entropy_with_logits(pred_rewards.squeeze(-1), rewards)
+            reward_loss = F.mse_loss(pred_rewards.squeeze(-1), rewards)
             action_loss = F.cross_entropy(pred_actions, actions.long())
             done_loss = F.binary_cross_entropy_with_logits(pred_dones.squeeze(-1), dones.float())
 
