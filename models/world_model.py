@@ -36,10 +36,10 @@ class WorldModel(BaseModel):
         self.deconv3 = nn.ConvTranspose2d(96, 48, kernel_size=4, stride=2, padding=1)
         self.deconv4 = nn.ConvTranspose2d(48, observation_shape[0], kernel_size=4, stride=2, padding=1)
 
-        self.fc_dec = nn.Linear(embed_dim + action_dim, self.flattened_dim) 
+        self.fc_dec = nn.Linear(embed_dim + action_dim, self.flattened_dim)
 
         self.reward_pred = nn.Linear(embed_dim + action_dim, 1)
-        self.action_pred = nn.Linear(embed_dim + action_dim, n_actions)
+        self.action_pred = nn.Linear(embed_dim, n_actions)
         self.done_pred = nn.Linear(embed_dim + action_dim, 1)
 
 
@@ -81,12 +81,14 @@ class WorldModel(BaseModel):
         # x: (B,3,H,W) in [0,1]
         x = self._conv_forward(obs)
         x = self.fc_enc(x)
-        y = self.action_input(action)
 
+        # Predict action from observation only (before concatenating with action)
+        action_pred = self.action_pred(x)
+
+        y = self.action_input(action)
         x = torch.cat([x, y], dim=1)
 
         reward_pred = torch.tanh(self.reward_pred(x))  # Output in range [-1, 1]
-        action_pred = self.action_pred(x)
         done_pred = self.done_pred(x)
 
         next_frame_pred = self.fc_dec(x)
