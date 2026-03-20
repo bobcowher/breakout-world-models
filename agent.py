@@ -90,32 +90,44 @@ class Agent:
         return obs_stacked
 
 
-    def imagine_trajectory(self, obs, batch_size):
+    def imagine_trajectory(self, batch_size, num_batches):
+        
+        obs, _, _, _, _ = self.memory.sample_buffer(1)
+
+        total_batch_size = batch_size * num_batches
+
         obs_shape   = obs.shape[1:]  # (4, 96, 96)
-        states      = torch.zeros(batch_size, *obs_shape)
-        actions     = torch.zeros(batch_size)
-        rewards     = torch.zeros(batch_size)
-        next_states = torch.zeros(batch_size, *obs_shape)
-        dones       = torch.zeros(batch_size)
+        states      = torch.zeros(total_batch_size, *obs_shape)
+        actions     = torch.zeros(total_batch_size)
+        rewards     = torch.zeros(total_batch_size)
+        next_states = torch.zeros(total_batch_size, *obs_shape)
+        dones       = torch.zeros(total_batch_size)
 
-        obs_normalized = self.normalize_observation(obs)
 
-        for i in range(batch_size):
-            # Select action using Q model
-            with torch.no_grad():
-                q_values = self.q_model(obs_normalized)
-                action_idx = q_values.argmax(dim=1)
-                action_onehot = F.one_hot(action_idx, num_classes=self.env.action_space.n).float()
+        for batch_idx in range(num_batches):
 
-            next_obs, reward, pred_action, done = self.world_model(obs_normalized, action_onehot)
+            obs, _, _, _, _ = self.memory.sample_buffer(1)
 
-            states[i]      = obs.squeeze(0)
-            actions[i]     = action_idx.item()
-            rewards[i]     = reward.item()
-            next_states[i] = next_obs.squeeze(0)
-            dones[i]       = (torch.sigmoid(done) > 0.5).float().item()
+            obs = self.normalize_observation(obs)
 
-            obs_normalized = next_obs
+            for step_idx in range(batch_size):
+
+                idx = batch_idx * batch_size + step_idx
+                # Select action using Q model
+                with torch.no_grad():
+                    q_values = self.q_model(obs)
+                    action_idx = q_values.argmax(dim=1)
+                    action_onehot = F.one_hot(action_idx, num_classes=self.env.action_space.n).float()
+
+                next_obs, reward, pred_action, done = self.world_model(obs, action_onehot)
+
+                states[idx]      = obs.squeeze(0)
+                actions[idx]     = action_idx.item()
+                rewards[idx]     = reward.item()
+                next_states[idx] = next_obs.squeeze(0)
+                dones[idx]       = (torch.sigmoid(done) > 0.5).float().item()
+
+                obs = next_obs
 
         states      = states.to(self.device)
         actions     = actions.to(self.device)
@@ -156,6 +168,7 @@ class Agent:
 
             self.world_model_optimizer.zero_grad()
             combined_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.world_model.parameters(), max_norm=1.0)
             self.world_model_optimizer.step()
 
             # Just for stats.
@@ -222,15 +235,13 @@ class Agent:
         return loss.item()
 
 
-    def train_q_model_on_imagination(self, batch_size, epochs=100):
+    def train_q_model_on_imagination(self, batch_size, num_batches, epochs=100):
 
         total_loss = 0
         
         for epoch in range(epochs):
 
-            seed_obs, _, _, _, dones = self.memory.sample_buffer(1)
-
-            observations, actions, rewards, next_observations, dones = self.imagine_trajectory(seed_obs, batch_size)
+            observations, actions, rewards, next_observations, dones = self.imagine_trajectory(batch_size, num_batches)
 
             actions = actions.unsqueeze(1).long()
             rewards = rewards.unsqueeze(1)
@@ -302,7 +313,7 @@ class Agent:
         self.q_model.train()
         return total_rewards
 
-    def train(self, episodes=1, world_model_epochs=1, q_model_epochs=1, summary_writer_suffix="_wm", batch_size=32, use_world_model=False):
+    def train(self, episodes=1, world_model_epochs=1, q_model_epochs=1, summary_writer_suffix="_wm", batch_size=1, num_batches=1, use_world_model=False):
 
         if use_world_model:
             run_tag = f'world_model_wme{world_model_epochs}_qe{q_model_epochs}_bs{batch_size}'
@@ -370,8 +381,8 @@ class Agent:
             if use_world_model:
                 combined_loss, reward_loss, action_loss, done_loss, next_frame_loss = self.train_world_model(epochs=world_model_epochs)
 
-                if episode > 5:
-                    episode_loss += self.train_q_model_on_imagination(batch_size, epochs=q_model_epochs)
+                if episode > 10:
+                    episode_loss += self.train_q_model_on_imagination(batch_size, num_batches=8, epochs=q_model_epochs)
 
                 writer.add_scalar("World Model/combined_loss", combined_loss, episode)
                 writer.add_scalar("World Model/reward_loss", reward_loss, episode)
