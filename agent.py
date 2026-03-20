@@ -109,14 +109,19 @@ class Agent:
             obs, _, _, _, _ = self.memory.sample_buffer(1)
 
             obs = self.normalize_observation(obs)
+            pred_action = None
 
             for step_idx in range(batch_size):
 
                 idx = batch_idx * batch_size + step_idx
-                # Select action using Q model
+                # Select action using world model action prediction with epsilon-greedy
                 with torch.no_grad():
-                    q_values = self.q_model(obs)
-                    action_idx = q_values.argmax(dim=1)
+                    if pred_action is None or random.random() < self.epsilon:
+                        # First step or explore: random action
+                        action_idx = torch.tensor([random.randint(0, self.env.action_space.n - 1)], device=obs.device)
+                    else:
+                        # Exploit: use world model's action prediction from previous step
+                        action_idx = pred_action.argmax(dim=1)
                     action_onehot = F.one_hot(action_idx, num_classes=self.env.action_space.n).float()
 
                 next_obs, reward, pred_action, done = self.world_model(obs, action_onehot)
