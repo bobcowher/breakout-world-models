@@ -10,4 +10,4 @@ env = LifePenaltyWrapper(env, penalty=-1.0)
 
 agent = Agent(env=env, max_buffer_size=20000) 
 
-agent.train(episodes=5000, q_model_epochs=200, world_model_epochs=100, use_world_model=True, batch_size=8, wm_batch_size=64, num_batches=8)
+agent.train(episodes=5000, q_model_epochs=200, world_model_epochs=100, use_world_model=True, batch_size=8, wm_batch_size=32, num_batches=8)
