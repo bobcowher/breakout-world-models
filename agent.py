@@ -142,7 +142,7 @@ class Agent:
 
         return states, actions, rewards, next_states, dones
 
-    def train_world_model(self, epochs):
+    def train_world_model(self, epochs, batch_size):
 
         total_reward_loss = 0
         total_action_loss = 0
@@ -152,7 +152,7 @@ class Agent:
         
         for i in range(epochs):
 
-            obs, actions, rewards, next_obs, dones = self.memory.sample_buffer(self.world_model_batch_size)
+            obs, actions, rewards, next_obs, dones = self.memory.sample_buffer(batch_size)
 
             next_obs_normalized = self.normalize_observation(next_obs)
             obs_normalized = self.normalize_observation(obs)
@@ -318,10 +318,10 @@ class Agent:
         self.q_model.train()
         return total_rewards
 
-    def train(self, episodes=1, world_model_epochs=1, q_model_epochs=1, summary_writer_suffix="_wm", batch_size=1, num_batches=1, use_world_model=False):
+    def train(self, episodes=1, world_model_epochs=1, q_model_epochs=1, summary_writer_suffix="_wm", batch_size=1, num_batches=1, wm_batch_size=1, use_world_model=False):
 
         if use_world_model:
-            run_tag = f'world_model_wme{world_model_epochs}_qe{q_model_epochs}_bs{batch_size}'
+            run_tag = f'world_model_wme{world_model_epochs}_qe{q_model_epochs}_bs{batch_size}_wmbs_{wm_batch_size}'
         else:
             run_tag = f'live_bs{batch_size}'
         summary_writer_name = f'runs/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}_{run_tag}'
@@ -384,7 +384,7 @@ class Agent:
             print(f"Episode {episode} | reward: {episode_reward:.1f} | epsilon: {self.epsilon:.3f} | steps: {episode_steps}")
 
             if use_world_model:
-                combined_loss, reward_loss, action_loss, done_loss, next_frame_loss = self.train_world_model(epochs=world_model_epochs)
+                combined_loss, reward_loss, action_loss, done_loss, next_frame_loss = self.train_world_model(epochs=world_model_epochs, batch_size=wm_batch_size)
 
                 if episode > 10:
                     episode_loss += self.train_q_model_on_imagination(batch_size, num_batches=8, epochs=q_model_epochs)
