@@ -320,6 +320,8 @@ class Agent:
 
     def train(self, episodes=1, world_model_epochs=1, q_model_epochs=1, summary_writer_suffix="_wm", batch_size=1, num_batches=1, wm_batch_size=1, use_world_model=False):
 
+        min_world_model_epochs = 20
+
         if use_world_model:
             run_tag = f'world_model_wme{world_model_epochs}_qe{q_model_epochs}_bs{batch_size}_wmbs_{wm_batch_size}'
         else:
@@ -386,6 +388,8 @@ class Agent:
             if use_world_model:
                 combined_loss, reward_loss, action_loss, done_loss, next_frame_loss = self.train_world_model(epochs=world_model_epochs, batch_size=wm_batch_size)
 
+                world_model_epochs = max(min_world_model_epochs, world_model_epochs - 1)
+
                 if episode > 10:
                     episode_loss += self.train_q_model_on_imagination(batch_size, num_batches=8, epochs=q_model_epochs)
 
@@ -394,6 +398,7 @@ class Agent:
                 writer.add_scalar("World Model/action_loss", action_loss, episode)
                 writer.add_scalar("World Model/done_loss", done_loss, episode)
                 writer.add_scalar("World Model/next_frame_loss", next_frame_loss, episode)
+                writer.add_scalar("World Model/epochs_per_episode", world_model_epochs, episode)
 
                 if episode % 100 == 0:
                     print(f"Completed episode {episode} - Reward loss: {reward_loss}")
