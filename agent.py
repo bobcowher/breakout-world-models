@@ -320,7 +320,7 @@ class Agent:
 
     def train(self, episodes=1, world_model_epochs=1, q_model_epochs=1, summary_writer_suffix="_wm", batch_size=1, num_batches=1, wm_batch_size=1, use_world_model=False):
 
-        min_world_model_epochs = 20
+        min_world_model_epochs = 40
 
         if use_world_model:
             run_tag = f'world_model_wme{world_model_epochs}_qe{q_model_epochs}_bs{batch_size}_wmbs_{wm_batch_size}'
