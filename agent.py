@@ -318,12 +318,10 @@ class Agent:
         self.q_model.train()
         return total_rewards
 
-    def train(self, episodes=1, world_model_epochs=1, q_model_epochs=1, summary_writer_suffix="_wm", batch_size=1, num_batches=1, wm_batch_size=1, use_world_model=False):
-
-        min_world_model_epochs = 40
+    def train(self, episodes=1, offline_training_epochs=1, wm_q_ratio=[1, 5], summary_writer_suffix="_wm", batch_size=1, num_batches=1, wm_batch_size=1, use_world_model=False):
 
         if use_world_model:
-            run_tag = f'world_model_wme{world_model_epochs}_qe{q_model_epochs}_bs{batch_size}_wmbs_{wm_batch_size}'
+            run_tag = f'world_model_ote{offline_training_epochs}_ratio{wm_q_ratio[0]}to{wm_q_ratio[1]}_bs{batch_size}_wmbs_{wm_batch_size}'
         else:
             run_tag = f'live_bs{batch_size}'
         summary_writer_name = f'runs/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}_{run_tag}'
@@ -386,22 +384,54 @@ class Agent:
             print(f"Episode {episode} | reward: {episode_reward:.1f} | epsilon: {self.epsilon:.3f} | steps: {episode_steps}")
 
             if use_world_model:
-                combined_loss, reward_loss, action_loss, done_loss, next_frame_loss = self.train_world_model(epochs=world_model_epochs, batch_size=wm_batch_size)
+                # Interleaved training with wm_q_ratio
+                total_combined_loss = 0
+                total_reward_loss = 0
+                total_action_loss = 0
+                total_done_loss = 0
+                total_next_frame_loss = 0
+                total_q_loss = 0
+                wm_updates = 0
+                q_updates = 0
 
-                world_model_epochs = max(min_world_model_epochs, world_model_epochs - 1)
+                for offline_epoch in range(offline_training_epochs):
+                    # World model updates
+                    for _ in range(wm_q_ratio[0]):
+                        combined_loss, reward_loss, action_loss, done_loss, next_frame_loss = self.train_world_model(epochs=1, batch_size=wm_batch_size)
+                        total_combined_loss += combined_loss
+                        total_reward_loss += reward_loss
+                        total_action_loss += action_loss
+                        total_done_loss += done_loss
+                        total_next_frame_loss += next_frame_loss
+                        wm_updates += 1
 
-                if episode > 10:
-                    episode_loss += self.train_q_model_on_imagination(batch_size, num_batches=8, epochs=q_model_epochs)
+                    # Q-model updates (skip first 10 episodes)
+                    if episode > 10:
+                        for _ in range(wm_q_ratio[1]):
+                            q_loss = self.train_q_model_on_imagination(batch_size, num_batches=num_batches, epochs=1)
+                            total_q_loss += q_loss
+                            q_updates += 1
 
-                writer.add_scalar("World Model/combined_loss", combined_loss, episode)
-                writer.add_scalar("World Model/reward_loss", reward_loss, episode)
-                writer.add_scalar("World Model/action_loss", action_loss, episode)
-                writer.add_scalar("World Model/done_loss", done_loss, episode)
-                writer.add_scalar("World Model/next_frame_loss", next_frame_loss, episode)
-                writer.add_scalar("World Model/epochs_per_episode", world_model_epochs, episode)
+                # Average the losses
+                avg_combined_loss = total_combined_loss / wm_updates if wm_updates > 0 else 0
+                avg_reward_loss = total_reward_loss / wm_updates if wm_updates > 0 else 0
+                avg_action_loss = total_action_loss / wm_updates if wm_updates > 0 else 0
+                avg_done_loss = total_done_loss / wm_updates if wm_updates > 0 else 0
+                avg_next_frame_loss = total_next_frame_loss / wm_updates if wm_updates > 0 else 0
+                episode_loss = total_q_loss / q_updates if q_updates > 0 else 0
+
+                writer.add_scalar("World Model/combined_loss", avg_combined_loss, episode)
+                writer.add_scalar("World Model/reward_loss", avg_reward_loss, episode)
+                writer.add_scalar("World Model/action_loss", avg_action_loss, episode)
+                writer.add_scalar("World Model/done_loss", avg_done_loss, episode)
+                writer.add_scalar("World Model/next_frame_loss", avg_next_frame_loss, episode)
+                writer.add_scalar("Train/wm_updates_per_episode", wm_updates, episode)
+                writer.add_scalar("Train/q_updates_per_episode", q_updates, episode)
+                writer.add_scalar("Train/wm_q_ratio_0", wm_q_ratio[0], episode)
+                writer.add_scalar("Train/wm_q_ratio_1", wm_q_ratio[1], episode)
 
                 if episode % 100 == 0:
-                    print(f"Completed episode {episode} - Reward loss: {reward_loss}")
+                    print(f"Completed episode {episode} - Reward loss: {avg_reward_loss}")
 
             writer.add_scalar("Train/episode_reward", episode_reward, episode)
             writer.add_scalar("Train/epsilon", self.epsilon, episode)
