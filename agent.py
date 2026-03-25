@@ -442,8 +442,8 @@ class Agent:
                 writer.add_scalar("World Model/next_frame_loss", avg_next_frame_loss, episode)
                 writer.add_scalar("Train/wm_updates_per_episode", wm_updates, episode)
                 writer.add_scalar("Train/q_updates_per_episode", q_updates, episode)
-                writer.add_scalar("Train/wm_q_ratio_0", current_ratio[0], episode)
-                writer.add_scalar("Train/wm_q_ratio_1", current_ratio[1], episode)
+                writer.add_scalar("Train/updates_per_cycle_wm", current_ratio[0], episode)
+                writer.add_scalar("Train/updates_per_cycle_q", current_ratio[1], episode)
 
                 if episode % 100 == 0:
                     print(f"Completed episode {episode} - Reward loss: {avg_reward_loss}")
