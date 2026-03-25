@@ -16,6 +16,20 @@ import random
 from models.perceptual_loss import PerceptualLoss
 import numpy as np
 
+def get_wm_q_ratio(episode):
+    """Dynamic world model to Q-model training ratio based on episode."""
+    if episode < 50:
+        return [5, 0]   # WM-only: aggressive world model training
+    elif episode < 200:
+        return [5, 1]   # WM-heavy: start Q training
+    elif episode < 500:
+        return [2, 2]   # Balanced
+    elif episode < 1500:
+        return [1, 5]   # Q-heavy: world model mature
+    else:
+        return [1, 10]  # Q-dominant: final policy refinement
+
+
 class Agent:
 
     def __init__(self, env : gym.Env,
@@ -318,10 +332,10 @@ class Agent:
         self.q_model.train()
         return total_rewards
 
-    def train(self, episodes=1, offline_training_epochs=1, wm_q_ratio=[1, 5], summary_writer_suffix="_wm", batch_size=1, num_batches=1, wm_batch_size=1, use_world_model=False):
+    def train(self, episodes=1, offline_training_epochs=1, summary_writer_suffix="_wm", batch_size=1, num_batches=1, wm_batch_size=1, use_world_model=False):
 
         if use_world_model:
-            run_tag = f'world_model_ote{offline_training_epochs}_ratio{wm_q_ratio[0]}to{wm_q_ratio[1]}_bs{batch_size}_wmbs_{wm_batch_size}'
+            run_tag = f'world_model_ote{offline_training_epochs}_dynamic_ratio_bs{batch_size}_wmbs_{wm_batch_size}'
         else:
             run_tag = f'live_bs{batch_size}'
         summary_writer_name = f'runs/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}_{run_tag}'
@@ -384,7 +398,9 @@ class Agent:
             print(f"Episode {episode} | reward: {episode_reward:.1f} | epsilon: {self.epsilon:.3f} | steps: {episode_steps}")
 
             if use_world_model:
-                # Interleaved training with wm_q_ratio
+                # Interleaved training with dynamic wm_q_ratio
+                current_ratio = get_wm_q_ratio(episode)
+
                 total_combined_loss = 0
                 total_reward_loss = 0
                 total_action_loss = 0
@@ -396,7 +412,7 @@ class Agent:
 
                 for offline_epoch in range(offline_training_epochs):
                     # World model updates
-                    for _ in range(wm_q_ratio[0]):
+                    for _ in range(current_ratio[0]):
                         combined_loss, reward_loss, action_loss, done_loss, next_frame_loss = self.train_world_model(epochs=1, batch_size=wm_batch_size)
                         total_combined_loss += combined_loss
                         total_reward_loss += reward_loss
@@ -405,12 +421,11 @@ class Agent:
                         total_next_frame_loss += next_frame_loss
                         wm_updates += 1
 
-                    # Q-model updates (skip first 10 episodes)
-                    if episode > 10:
-                        for _ in range(wm_q_ratio[1]):
-                            q_loss = self.train_q_model_on_imagination(batch_size, num_batches=num_batches, epochs=1)
-                            total_q_loss += q_loss
-                            q_updates += 1
+                    # Q-model updates (ratio[1]=0 means no Q training)
+                    for _ in range(current_ratio[1]):
+                        q_loss = self.train_q_model_on_imagination(batch_size, num_batches=num_batches, epochs=1)
+                        total_q_loss += q_loss
+                        q_updates += 1
 
                 # Average the losses
                 avg_combined_loss = total_combined_loss / wm_updates if wm_updates > 0 else 0
@@ -427,8 +442,8 @@ class Agent:
                 writer.add_scalar("World Model/next_frame_loss", avg_next_frame_loss, episode)
                 writer.add_scalar("Train/wm_updates_per_episode", wm_updates, episode)
                 writer.add_scalar("Train/q_updates_per_episode", q_updates, episode)
-                writer.add_scalar("Train/wm_q_ratio_0", wm_q_ratio[0], episode)
-                writer.add_scalar("Train/wm_q_ratio_1", wm_q_ratio[1], episode)
+                writer.add_scalar("Train/wm_q_ratio_0", current_ratio[0], episode)
+                writer.add_scalar("Train/wm_q_ratio_1", current_ratio[1], episode)
 
                 if episode % 100 == 0:
                     print(f"Completed episode {episode} - Reward loss: {avg_reward_loss}")
