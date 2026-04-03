@@ -33,7 +33,7 @@ def get_wm_q_ratio(episode):
 class Agent:
 
     def __init__(self, env : gym.Env,
-                       max_buffer_size : int = 10000,
+                       max_buffer_size : int = 100000,
                        world_model_batch_size = 8,
                        target_update_interval = 10000) -> None:
         self.env = env
