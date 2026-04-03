@@ -17,12 +17,13 @@ from models.perceptual_loss import PerceptualLoss
 import numpy as np
 
 def get_wm_q_ratio(episode):
-    """Dynamic world model to Q-model training ratio based on episode."""
+    """Dynamic world model to Q-model training ratio based on episode.
+    Extended WM-heavy phase to prevent degradation observed at ep 200."""
     if episode < 50:
         return [5, 0]   # WM-only: aggressive world model training
-    elif episode < 200:
+    elif episode < 500:  # Extended from 200: maintain strong WM training
         return [5, 1]   # WM-heavy: start Q training
-    elif episode < 500:
+    elif episode < 1000:
         return [2, 2]   # Balanced
     elif episode < 1500:
         return [1, 5]   # Q-heavy: world model mature
