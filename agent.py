@@ -294,6 +294,45 @@ class Agent:
 
 
 
+    def evaluate_rollout(self, num_steps=8, filename="eval_rollout.png"):
+        """Evaluate world model rollout quality over multiple steps.
+
+        Args:
+            num_steps: Number of rollout steps to visualize
+            filename: Output image path
+        """
+        if not self.memory.can_sample(1):
+            return
+
+        # Sample a starting observation
+        obs, _, _, _, _ = self.memory.sample_buffer(1)
+        obs = self.normalize_observation(obs)  # [1, 4, 96, 96]
+
+        rollout_frames = [("step_0_real", obs.cpu())]
+        current_obs = obs
+
+        with torch.no_grad():
+            for step in range(1, num_steps + 1):
+                # Use a dummy action to get action prediction from world model
+                dummy_action = torch.zeros(1, self.env.action_space.n, device=self.device)
+                _, _, action_logits, _ = self.world_model.forward(current_obs, dummy_action)
+                action_pred = torch.argmax(action_logits, dim=1)  # [1]
+
+                # Create one-hot action from prediction
+                action_onehot = F.one_hot(action_pred, num_classes=self.env.action_space.n).float()
+
+                # Predict next observation using the predicted action
+                pred_next_obs, _, _, _ = self.world_model.forward(current_obs, action_onehot)
+
+                # Store the predicted observation
+                rollout_frames.append((f"step_{step}_pred", pred_next_obs.cpu()))
+
+                # Use predicted observation as input for next step
+                current_obs = pred_next_obs
+
+        # Visualize all rollout steps (show only last frame of each 4-frame stack)
+        display_stacked_obs(rollout_frames, filename, num_frames=1)
+
     def save(self):
         self.world_model.save_the_model("world_model", verbose=True)
         self.q_model.save_the_model("q_model", verbose=True)
@@ -455,7 +494,11 @@ class Agent:
                 # If we're doing live training, we need to divide by episode steps
                 episode_loss = episode_loss if use_world_model else episode_loss / episode_steps
                 writer.add_scalar("Train/avg_q_loss", episode_loss, episode)
-            
+
+            # Evaluate rollout quality once per episode
+            if use_world_model:
+                self.evaluate_rollout(num_steps=8, filename="eval_rollout.png")
+
             if episode % 10 == 0:
                 self.save()
 
