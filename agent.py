@@ -313,14 +313,15 @@ class Agent:
 
         with torch.no_grad():
             for step in range(1, num_steps + 1):
-                # Use world model to predict action from current observation
-                _, _, action_logits, _ = self.world_model.forward(current_obs, None)
+                # Use a dummy action to get action prediction from world model
+                dummy_action = torch.zeros(1, self.env.action_space.n, device=self.device)
+                _, _, action_logits, _ = self.world_model.forward(current_obs, dummy_action)
                 action_pred = torch.argmax(action_logits, dim=1)  # [1]
 
-                # Create one-hot action
+                # Create one-hot action from prediction
                 action_onehot = F.one_hot(action_pred, num_classes=self.env.action_space.n).float()
 
-                # Predict next observation (full 4-frame stack)
+                # Predict next observation using the predicted action
                 pred_next_obs, _, _, _ = self.world_model.forward(current_obs, action_onehot)
 
                 # Store the predicted observation
