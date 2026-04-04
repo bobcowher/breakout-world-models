@@ -17,17 +17,36 @@ from models.perceptual_loss import PerceptualLoss
 import numpy as np
 
 def get_wm_q_ratio(episode):
-    """Dynamic world model to Q-model training ratio based on episode."""
+    """Dynamic world model to Q-model training ratio based on episode.
+
+    Scaled down from original because rollout training does 4x more work per update.
+    """
     if episode < 50:
-        return [5, 0]   # WM-only: aggressive world model training
+        return [1, 0]   # WM-only: was [5,0] but rollouts are 4x more expensive
     elif episode < 200:
-        return [5, 1]   # WM-heavy: start Q training
+        return [2, 1]   # WM-heavy: was [5,1]
     elif episode < 500:
-        return [2, 2]   # Balanced
+        return [1, 1]   # Balanced: was [2,2]
     elif episode < 1500:
         return [1, 5]   # Q-heavy: world model mature
     else:
         return [1, 10]  # Q-dominant: final policy refinement
+
+
+def get_rollout_steps(episode):
+    """Gradually increase rollout steps as model matures.
+
+    Start with single-step for fast initial learning, gradually increase
+    to 4-step for robustness to compounding errors.
+    """
+    if episode < 100:
+        return 1  # Single-step training early on (fast)
+    elif episode < 300:
+        return 2  # 2-step rollouts
+    elif episode < 600:
+        return 3  # 3-step rollouts
+    else:
+        return 4  # Full 4-step rollouts (robust)
 
 
 class Agent:
@@ -512,10 +531,13 @@ class Agent:
                 wm_updates = 0
                 q_updates = 0
 
+                # Get dynamic rollout steps based on episode
+                rollout_steps = get_rollout_steps(episode)
+
                 for offline_epoch in range(offline_training_epochs):
                     # World model updates
                     for _ in range(current_ratio[0]):
-                        combined_loss, reward_loss, action_loss, done_loss, next_frame_loss, pixel_loss, perceptual_loss = self.train_world_model(epochs=1, batch_size=wm_batch_size)
+                        combined_loss, reward_loss, action_loss, done_loss, next_frame_loss, pixel_loss, perceptual_loss = self.train_world_model(epochs=1, batch_size=wm_batch_size, rollout_steps=rollout_steps)
                         total_combined_loss += combined_loss
                         total_reward_loss += reward_loss
                         total_action_loss += action_loss
@@ -552,6 +574,7 @@ class Agent:
                 writer.add_scalar("World Model/pixel_loss", avg_pixel_loss, episode)
                 writer.add_scalar("World Model/perceptual_loss", avg_perceptual_loss, episode)
                 writer.add_scalar("World Model/scheduled_sampling_real_prob", use_real_prob, episode)
+                writer.add_scalar("World Model/rollout_steps", rollout_steps, episode)
                 writer.add_scalar("Train/wm_updates_per_episode", wm_updates, episode)
                 writer.add_scalar("Train/q_updates_per_episode", q_updates, episode)
                 writer.add_scalar("Train/updates_per_cycle_wm", current_ratio[0], episode)
