@@ -156,45 +156,96 @@ class Agent:
 
         return states, actions, rewards, next_states, dones
 
-    def train_world_model(self, epochs, batch_size):
+    def train_world_model(self, epochs, batch_size, rollout_steps=4):
+        """
+        Train world model with multi-step rollouts and scheduled sampling.
 
+        Args:
+            epochs: Number of training iterations
+            batch_size: Batch size for sampling
+            rollout_steps: Number of steps to roll out (default 4)
+        """
         total_reward_loss = 0
         total_action_loss = 0
         total_done_loss = 0
         total_next_frame_loss = 0
         total_combined_loss = 0
-        
+
+        # Scheduled sampling: decay from 1.0 (always use real) to 0.5 (mix real/predicted)
+        # Over ~50k steps
+        use_real_prob = max(0.5, 1.0 - self.total_steps / 50000.0)
+
         for i in range(epochs):
+            # Sample initial observations and targets for each rollout step
+            obs_batch, actions_batch, rewards_batch, next_obs_batch, dones_batch = [], [], [], [], []
+            for _ in range(rollout_steps):
+                obs, actions, rewards, next_obs, dones = self.memory.sample_buffer(batch_size)
+                obs_batch.append(obs)
+                actions_batch.append(actions)
+                rewards_batch.append(rewards)
+                next_obs_batch.append(next_obs)
+                dones_batch.append(dones)
 
-            obs, actions, rewards, next_obs, dones = self.memory.sample_buffer(batch_size)
+            # Start rollout from first sampled observations
+            current_obs = self.normalize_observation(obs_batch[0])
 
-            next_obs_normalized = self.normalize_observation(next_obs)
-            obs_normalized = self.normalize_observation(obs)
+            # Accumulate losses across rollout steps
+            step_combined_loss = 0
+            step_reward_loss = 0
+            step_action_loss = 0
+            step_done_loss = 0
+            step_next_frame_loss = 0
 
-            # One-hot encode actions for world model input
-            actions_onehot = F.one_hot(actions.long(), num_classes=self.env.action_space.n).float()
+            for step in range(rollout_steps):
+                # Get action and target for this step
+                actions = actions_batch[step]
+                target_obs = self.normalize_observation(next_obs_batch[step])
+                target_rewards = rewards_batch[step]
+                target_dones = dones_batch[step]
 
-            pred_next_frame, pred_rewards, pred_actions, pred_dones = self.world_model.forward(obs_normalized, actions_onehot)
+                # One-hot encode actions
+                actions_onehot = F.one_hot(actions.long(), num_classes=self.env.action_space.n).float()
 
-            reward_loss = F.mse_loss(pred_rewards.squeeze(-1), rewards)
-            action_loss = F.cross_entropy(pred_actions, actions.long())
-            done_loss = F.binary_cross_entropy_with_logits(pred_dones.squeeze(-1), dones.float())
+                # Predict next state
+                pred_next_frame, pred_rewards, pred_actions, pred_dones = self.world_model.forward(
+                    current_obs, actions_onehot
+                )
 
-            # next_frame_loss = F.l1_loss(pred_next_frame, next_obs_normalized)
-            next_frame_loss = self.next_frame_loss(pred_next_frame, next_obs_normalized)
+                # Calculate losses against real targets
+                reward_loss = F.mse_loss(pred_rewards.squeeze(-1), target_rewards)
+                action_loss = F.cross_entropy(pred_actions, actions.long())
+                done_loss = F.binary_cross_entropy_with_logits(pred_dones.squeeze(-1), target_dones.float())
+                next_frame_loss = self.next_frame_loss(pred_next_frame, target_obs)
 
-            combined_loss = reward_loss + action_loss + done_loss + next_frame_loss
+                step_combined_loss += reward_loss + action_loss + done_loss + next_frame_loss
+                step_reward_loss += reward_loss.item()
+                step_action_loss += action_loss.item()
+                step_done_loss += done_loss.item()
+                step_next_frame_loss += next_frame_loss.item()
 
+                # Scheduled sampling: decide input for next step
+                if step < rollout_steps - 1:  # Not the last step
+                    if random.random() < use_real_prob:
+                        # Use real observation (traditional training)
+                        current_obs = self.normalize_observation(obs_batch[step + 1])
+                    else:
+                        # Use model's prediction (expose model to its own errors)
+                        current_obs = pred_next_frame.detach()
+
+            # Average loss across rollout steps
+            combined_loss = step_combined_loss / rollout_steps
+
+            # Backprop and optimize
             self.world_model_optimizer.zero_grad()
             combined_loss.backward()
             torch.nn.utils.clip_grad_norm_(self.world_model.parameters(), max_norm=1.0)
             self.world_model_optimizer.step()
 
-            # Just for stats.
-            total_reward_loss += reward_loss.item()
-            total_action_loss += action_loss.item()
-            total_done_loss += done_loss.item()
-            total_next_frame_loss += next_frame_loss.item()
+            # Accumulate stats
+            total_reward_loss += step_reward_loss / rollout_steps
+            total_action_loss += step_action_loss / rollout_steps
+            total_done_loss += step_done_loss / rollout_steps
+            total_next_frame_loss += step_next_frame_loss / rollout_steps
             total_combined_loss += combined_loss.item()
 
         avg_combined_loss    = total_combined_loss / epochs
@@ -474,11 +525,15 @@ class Agent:
                 avg_next_frame_loss = total_next_frame_loss / wm_updates if wm_updates > 0 else 0
                 episode_loss = total_q_loss / q_updates if q_updates > 0 else 0
 
+                # Calculate current scheduled sampling probability
+                use_real_prob = max(0.5, 1.0 - self.total_steps / 50000.0)
+
                 writer.add_scalar("World Model/combined_loss", avg_combined_loss, episode)
                 writer.add_scalar("World Model/reward_loss", avg_reward_loss, episode)
                 writer.add_scalar("World Model/action_loss", avg_action_loss, episode)
                 writer.add_scalar("World Model/done_loss", avg_done_loss, episode)
                 writer.add_scalar("World Model/next_frame_loss", avg_next_frame_loss, episode)
+                writer.add_scalar("World Model/scheduled_sampling_real_prob", use_real_prob, episode)
                 writer.add_scalar("Train/wm_updates_per_episode", wm_updates, episode)
                 writer.add_scalar("Train/q_updates_per_episode", q_updates, episode)
                 writer.add_scalar("Train/updates_per_cycle_wm", current_ratio[0], episode)
