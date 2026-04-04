@@ -169,6 +169,8 @@ class Agent:
         total_action_loss = 0
         total_done_loss = 0
         total_next_frame_loss = 0
+        total_pixel_loss = 0
+        total_perceptual_loss = 0
         total_combined_loss = 0
 
         # Scheduled sampling: decay from 1.0 (always use real) to 0.5 (mix real/predicted)
@@ -215,7 +217,11 @@ class Agent:
                 reward_loss = F.mse_loss(pred_rewards.squeeze(-1), target_rewards)
                 action_loss = F.cross_entropy(pred_actions, actions.long())
                 done_loss = F.binary_cross_entropy_with_logits(pred_dones.squeeze(-1), target_dones.float())
-                next_frame_loss = self.next_frame_loss(pred_next_frame, target_obs)
+
+                # Combine perceptual and pixel-level losses
+                perceptual_loss = self.next_frame_loss(pred_next_frame, target_obs)
+                pixel_loss = F.mse_loss(pred_next_frame, target_obs)
+                next_frame_loss = 0.5 * perceptual_loss + 0.5 * pixel_loss
 
                 step_combined_loss += reward_loss + action_loss + done_loss + next_frame_loss
                 step_reward_loss += reward_loss.item()
@@ -241,11 +247,13 @@ class Agent:
             torch.nn.utils.clip_grad_norm_(self.world_model.parameters(), max_norm=1.0)
             self.world_model_optimizer.step()
 
-            # Accumulate stats
+            # Accumulate stats (pixel and perceptual computed in loop, extract last ones for logging)
             total_reward_loss += step_reward_loss / rollout_steps
             total_action_loss += step_action_loss / rollout_steps
             total_done_loss += step_done_loss / rollout_steps
             total_next_frame_loss += step_next_frame_loss / rollout_steps
+            total_pixel_loss += pixel_loss.item()
+            total_perceptual_loss += perceptual_loss.item()
             total_combined_loss += combined_loss.item()
 
         avg_combined_loss    = total_combined_loss / epochs
@@ -253,8 +261,10 @@ class Agent:
         avg_action_loss      = total_action_loss / epochs
         avg_done_loss        = total_done_loss / epochs
         avg_next_frame_loss  = total_next_frame_loss / epochs
+        avg_pixel_loss       = total_pixel_loss / epochs
+        avg_perceptual_loss  = total_perceptual_loss / epochs
 
-        return avg_combined_loss, avg_reward_loss, avg_action_loss, avg_done_loss, avg_next_frame_loss
+        return avg_combined_loss, avg_reward_loss, avg_action_loss, avg_done_loss, avg_next_frame_loss, avg_pixel_loss, avg_perceptual_loss
         
 
             # Training
@@ -496,6 +506,8 @@ class Agent:
                 total_action_loss = 0
                 total_done_loss = 0
                 total_next_frame_loss = 0
+                total_pixel_loss = 0
+                total_perceptual_loss = 0
                 total_q_loss = 0
                 wm_updates = 0
                 q_updates = 0
@@ -503,12 +515,14 @@ class Agent:
                 for offline_epoch in range(offline_training_epochs):
                     # World model updates
                     for _ in range(current_ratio[0]):
-                        combined_loss, reward_loss, action_loss, done_loss, next_frame_loss = self.train_world_model(epochs=1, batch_size=wm_batch_size)
+                        combined_loss, reward_loss, action_loss, done_loss, next_frame_loss, pixel_loss, perceptual_loss = self.train_world_model(epochs=1, batch_size=wm_batch_size)
                         total_combined_loss += combined_loss
                         total_reward_loss += reward_loss
                         total_action_loss += action_loss
                         total_done_loss += done_loss
                         total_next_frame_loss += next_frame_loss
+                        total_pixel_loss += pixel_loss
+                        total_perceptual_loss += perceptual_loss
                         wm_updates += 1
 
                     # Q-model updates (ratio[1]=0 means no Q training)
@@ -523,6 +537,8 @@ class Agent:
                 avg_action_loss = total_action_loss / wm_updates if wm_updates > 0 else 0
                 avg_done_loss = total_done_loss / wm_updates if wm_updates > 0 else 0
                 avg_next_frame_loss = total_next_frame_loss / wm_updates if wm_updates > 0 else 0
+                avg_pixel_loss = total_pixel_loss / wm_updates if wm_updates > 0 else 0
+                avg_perceptual_loss = total_perceptual_loss / wm_updates if wm_updates > 0 else 0
                 episode_loss = total_q_loss / q_updates if q_updates > 0 else 0
 
                 # Calculate current scheduled sampling probability
@@ -533,6 +549,8 @@ class Agent:
                 writer.add_scalar("World Model/action_loss", avg_action_loss, episode)
                 writer.add_scalar("World Model/done_loss", avg_done_loss, episode)
                 writer.add_scalar("World Model/next_frame_loss", avg_next_frame_loss, episode)
+                writer.add_scalar("World Model/pixel_loss", avg_pixel_loss, episode)
+                writer.add_scalar("World Model/perceptual_loss", avg_perceptual_loss, episode)
                 writer.add_scalar("World Model/scheduled_sampling_real_prob", use_real_prob, episode)
                 writer.add_scalar("Train/wm_updates_per_episode", wm_updates, episode)
                 writer.add_scalar("Train/q_updates_per_episode", q_updates, episode)

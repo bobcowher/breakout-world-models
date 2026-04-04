@@ -73,8 +73,13 @@ class WorldModel(BaseModel):
         x = F.elu(self.deconv1(x))
         x = F.elu(self.deconv2(x))
         x = F.elu(self.deconv3(x))
-        x = F.elu(self.deconv4(x))
-       
+        x = self.deconv4(x)  # No activation before sigmoid
+
+        # Clamp to prevent sigmoid saturation
+        # Sigmoid(5) ≈ 0.993, Sigmoid(-5) ≈ 0.007
+        # This keeps outputs in reasonable range
+        x = torch.clamp(x, -5.0, 5.0)
+
         return x
         
     def forward(self, obs, action):
