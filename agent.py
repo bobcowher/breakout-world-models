@@ -143,32 +143,56 @@ class Agent:
 
     def train_world_model(self, epochs, batch_size):
 
-        total_reward_loss = 0
-        total_action_loss = 0
-        total_done_loss = 0
-        total_next_frame_loss = 0
-        total_combined_loss = 0
+        avg_loss = {"world_model": 0.0,
+                      "recon": 0.0}
         
-        for i in range(epochs):
+        for _ in range(epochs):
 
             obs, actions, rewards, next_obs, dones = self.memory.sample_buffer(batch_size)
 
-            next_obs_normalized = self.normalize_observation(next_obs)
-            obs_normalized = self.normalize_observation(obs)
+            loss, loss_dict = self.world_model.compute_loss(obs, actions, rewards, dones)
+            
+            self.world_model_optimizer.zero_grad()
+            loss.backward()
+            self.world_model_optimizer.step()
 
-            # One-hot encode actions for world model input
-            actions_onehot = F.one_hot(actions.long(), num_classes=self.env.action_space.n).float()
+            avg_loss["world_model"] += loss.item()
+            avg_loss["recon"]       += loss_dict["recon"]
 
-            pred_next_frame, pred_rewards, pred_actions, pred_dones = self.world_model.forward(obs_normalized, actions_onehot)
+        # Actually average average loss
+        for key, val in avg_loss.items():
+            avg_loss[key] = val / epochs
 
-            reward_loss = F.mse_loss(pred_rewards.squeeze(-1), rewards)
-            action_loss = F.cross_entropy(pred_actions, actions.long())
-            done_loss = F.binary_cross_entropy_with_logits(pred_dones.squeeze(-1), dones.float())
+        return avg_loss
 
-            # next_frame_loss = F.l1_loss(pred_next_frame, next_obs_normalized)
-            next_frame_loss = self.next_frame_loss(pred_next_frame, next_obs_normalized)
+    
+    def evaluate_policy(self, num_episodes=3):
+        total_reward = 0
+        
+        for _ in range(num_episodes):
+            obs, _ = self.env.reset()
+            obs = self.process_observation(obs)
+            done = False
+            episode_reward = 0
+            
+            h, z = self.world_model.get_initial_state(1)
 
-            combined_loss = reward_loss + action_loss + done_loss + next_frame_loss
+            prev_action = np.zeros(3, dtype=np.float32)
+            
+            while not done:
+
+                action, h, z = self.get_action(obs, h, z, prev_action)
+                
+                obs, reward, done, truncated, _ = self.env.step(action)
+                obs = self.process_observation(obs)
+                done = done or truncated
+                episode_reward += float(reward)
+
+                prev_action = action
+                
+                if done:
+                    pass
+                    # Only print the last action, for log purposes. 
 
             self.world_model_optimizer.zero_grad()
             combined_loss.backward()

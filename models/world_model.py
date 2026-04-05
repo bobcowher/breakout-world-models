@@ -1,4 +1,4 @@
-from numpy import int32
+from numpy import int32, rec
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7,97 +7,73 @@ from models.base import BaseModel
 
 class WorldModel(BaseModel):
 
-    def __init__(self, observation_shape=(), embed_dim=1024, action_dim=128, n_actions=4):
+    def __init__(self, observation_shape=(), embed_dim=1024, action_dim=128, n_actions=4, feature_dim=1024):
         super().__init__()
 
         # print(observation_shape[-1])
         # conv_output_dim = 64
         self.encoder = Encoder(observation_shape=observation_shape, embed_dim=embed_dim)
-
-        self.conv1 = nn.Conv2d(observation_shape[0], 48, kernel_size=4, stride=2, padding=1)
-        self.conv2 = nn.Conv2d(48, 96, kernel_size=4, stride=2, padding=1)
-        self.conv3 = nn.Conv2d(96, 192, kernel_size=4, stride=2, padding=1)
-        self.conv4 = nn.Conv2d(192, 384, kernel_size=4, stride=2, padding=1)
+        self.decoder = Decoder(observation_shape=observation_shape, embed_dim=feature_dim)
 
         self.action_input = nn.Linear(n_actions, action_dim)
 
         self.flatten = torch.nn.Flatten()
         
-
-        with torch.no_grad():
-            dummy = torch.zeros(1, *observation_shape, dtype=torch.uint8)
-            feats = self._conv_features(dummy)         # (1, C_enc, H_enc, W_enc)
-            self.conv_output_shape = feats.shape[1:]   # (C_enc, H_enc, W_enc)
-            self.flattened_dim = feats.numel() // 1    # C_enc * H_enc * W_enc
-            print(f"Conv output shape: {feats.shape}, flattened dim: {self.flattened_dim}")
-
-        self.fc_enc = nn.Linear(self.flattened_dim, embed_dim)  # ADD THIS
-
-        self.deconv1 = nn.ConvTranspose2d(384, 192, kernel_size=4, stride=2, padding=1)
-        self.deconv2 = nn.ConvTranspose2d(192, 96, kernel_size=4, stride=2, padding=1)
-        self.deconv3 = nn.ConvTranspose2d(96, 48, kernel_size=4, stride=2, padding=1)
-        self.deconv4 = nn.ConvTranspose2d(48, observation_shape[0], kernel_size=4, stride=2, padding=1)
-
-        self.fc_dec = nn.Linear(embed_dim + action_dim, self.flattened_dim)
-
         self.reward_pred = nn.Linear(embed_dim + action_dim, 1)
         self.action_pred = nn.Linear(embed_dim, n_actions)
         self.done_pred = nn.Linear(embed_dim + action_dim, 1)
 
-
-        # self.conv3 = nn.Conv2d()
-
         print(f"VAE network initialized. Input shape: {observation_shape}")
 
 
-    def get_output_shape(self):
+    def encode(self, obs):
+        batch_size, sequence_length = obs.shape[:2]
+        obs_flat = obs.view(batch_size * sequence_length, *obs.shape[2:])
+        embed_flat = self.encoder(obs_flat)
+        embeds = embed_flat.view(batch_size, sequence_length, -1)
+
+        return embeds
+
+    def decode(self, embeds):
+        return self.decoder(embeds)
         return self.conv_output_shape
 
-
-    def _conv_features(self, x):
-        # Convert uint8 to float if needed (for initialization)
-        if x.dtype == torch.uint8:
-            x = x.float() / 255.0
-        x = F.elu(self.conv1(x))
-        x = F.elu(self.conv2(x))
-        x = F.elu(self.conv3(x))
-        x = F.elu(self.conv4(x))
-
-        return x  # (B, C_enc, H_enc, W_enc)
-
-    def _conv_forward(self, x):
-        x = self._conv_features(x)
-        x = self.flatten(x)
-        return x
-
-    def _deconv_forward(self, x):
-        x = x.view(-1, *self.conv_output_shape)
-        x = F.elu(self.deconv1(x))
-        x = F.elu(self.deconv2(x))
-        x = F.elu(self.deconv3(x))
-        x = F.elu(self.deconv4(x))
+    def compute_loss(self, obs, actions, rewards, continues):
        
-        return x
+        obs_normalized = obs.float() / 255.0
         
+        recon, embeds, reward_pred, action_pred, done_pred = self.forward(obs, actions)
+        
+        recon_loss = F.l1_loss(recon, obs_normalized)
+
+        combined_loss = recon_loss
+
+        return combined_loss, {
+            "recon": recon_loss.item(),
+        }
+
+
     def forward(self, obs, action):
         # x: (B,3,H,W) in [0,1]
-        x = self._conv_forward(obs)
-        x = self.fc_enc(x)
+        embeds = self.encode(obs)
+        recon = self.decode(obs)
 
         # Predict action from observation only (before concatenating with action)
-        action_pred = self.action_pred(x)
+        # action_pred = self.action_pred(x)
+        #
+        # y = self.action_input(action)
+        # x = torch.cat([x, y], dim=1)
+        #
+        # reward_pred = torch.tanh(self.reward_pred(x))  # Output in range [-1, 1]
+        # done_pred = self.done_pred(x)
+        #
+        # next_frame_pred = self.fc_dec(x)
+        # next_frame_pred = self._deconv_forward(next_frame_pred)
+        # next_frame_pred = torch.sigmoid(next_frame_pred)
+        #
+        reward_pred, action_pred, done_pred = 0, 0, 0
 
-        y = self.action_input(action)
-        x = torch.cat([x, y], dim=1)
-
-        reward_pred = torch.tanh(self.reward_pred(x))  # Output in range [-1, 1]
-        done_pred = self.done_pred(x)
-
-        next_frame_pred = self.fc_dec(x)
-        next_frame_pred = self._deconv_forward(next_frame_pred)
-        next_frame_pred = torch.sigmoid(next_frame_pred)
-
-        return next_frame_pred, reward_pred, action_pred, done_pred
+        return recon, embeds, reward_pred, action_pred, done_pred
     
 
 
