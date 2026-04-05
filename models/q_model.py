@@ -4,11 +4,11 @@ import torch.nn.functional as F
 from models.base import BaseModel
 
 class QModel(BaseModel):
-    def __init__(self, action_dim, hidden_dim=256, observation_shape=None, obs_stack=4):
+    def __init__(self, action_dim, hidden_dim=256, observation_shape=None):
         super(QModel, self).__init__()
 
         # CNN layers with a third layer added
-        self.conv1 = nn.Conv2d(in_channels=obs_stack, out_channels=32, kernel_size=8, stride=4)
+        self.conv1 = nn.Conv2d(in_channels=3, out_channels=32, kernel_size=8, stride=4)
         self.conv2 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=4, stride=2)
         self.conv3 = nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, stride=1)  # Third convolutional layer
 

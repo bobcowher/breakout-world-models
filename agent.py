@@ -37,8 +37,6 @@ class Agent:
                        world_model_batch_size = 8,
                        target_update_interval = 10000) -> None:
         self.env = env
-        self.frame_stack = 4
-        self.frames = deque(maxlen=self.frame_stack)
         self.device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
         obs, info = self.env.reset()
@@ -53,15 +51,14 @@ class Agent:
         
         print(f"Observation shape: {obs.shape}")
 
-        
         self.world_model_optimizer = torch.optim.Adam(self.world_model.parameters(), lr=0.0001)
 
         self.world_model_batch_size = world_model_batch_size
 
         self.next_frame_loss = PerceptualLoss().to(self.device)
 
-        self.q_model = QModel(action_dim=self.env.action_space.n, hidden_dim=256, observation_shape=tuple(obs.shape), obs_stack=self.frame_stack).to(self.device)
-        self.target_q_model = QModel(action_dim=self.env.action_space.n, hidden_dim=256, observation_shape=tuple(obs.shape), obs_stack=self.frame_stack).to(self.device)
+        self.q_model = QModel(action_dim=self.env.action_space.n, hidden_dim=256, observation_shape=tuple(obs.shape)).to(self.device)
+        self.target_q_model = QModel(action_dim=self.env.action_space.n, hidden_dim=256, observation_shape=tuple(obs.shape)).to(self.device)
 
         self.q_model_optimizer = torch.optim.Adam(self.q_model.parameters(), lr=0.0001)
 
@@ -74,34 +71,24 @@ class Agent:
         self.epsilon_decay = 0.995
         self.total_steps = 0
     
-    def init_frame_stack(self, obs):
-        """Call once after env.reset().  Pre-fill both deques."""
-        self.frames.clear()
-        for _ in range(self.frame_stack):
-            self.frames.append(obs)
-
     def normalize_observation(self, obs):
         return obs / 255.0
 
-    def process_observation(self, obs, clear_stack=False):
+    def process_observation(self, obs):
         # obs = torch.tensor(obs, dtype=torch.float32).permute(2,0,1)  
 
         obs = cv2.resize(obs, (96, 96), interpolation=cv2.INTER_NEAREST) # shrink to 128
-        obs = cv2.cvtColor(obs, cv2.COLOR_RGB2GRAY) # let's do grayscale    
+        # obs = cv2.cvtColor(obs, cv2.COLOR_RGB2GRAY) # let's do grayscale    
         # obs = torch.from_numpy(obs).permute(2, 0, 1).to(self.device)
+
+
         obs = torch.from_numpy(obs)
 
-        if(len(self.frames) < self.frame_stack):
-            self.init_frame_stack(obs)
-            
-        if(clear_stack):
-            self.init_frame_stack(obs)
+        obs = obs.permute(2, 0, 1)
+        
+        print(obs.shape)
 
-        self.frames.append(obs)
-
-        obs_stacked = torch.stack(list(self.frames), dim=0)
-
-        return obs_stacked
+        return obs 
 
 
     def imagine_trajectory(self, batch_size, num_batches):
@@ -460,11 +447,12 @@ class Agent:
                         total_next_frame_loss += next_frame_loss
                         wm_updates += 1
 
+                    # TODO: Re-enable
                     # Q-model updates (ratio[1]=0 means no Q training)
-                    for _ in range(current_ratio[1]):
-                        q_loss = self.train_q_model_on_imagination(batch_size, num_batches=num_batches, epochs=1)
-                        total_q_loss += q_loss
-                        q_updates += 1
+                    # for _ in range(current_ratio[1]):
+                    #     q_loss = self.train_q_model_on_imagination(batch_size, num_batches=num_batches, epochs=1)
+                    #     total_q_loss += q_loss
+                    #     q_updates += 1
 
                 # Average the losses
                 avg_combined_loss = total_combined_loss / wm_updates if wm_updates > 0 else 0

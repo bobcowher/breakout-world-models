@@ -2,6 +2,7 @@ from numpy import int32
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from models.encoder import Encoder, Decoder
 from models.base import BaseModel
 
 class WorldModel(BaseModel):
@@ -11,6 +12,7 @@ class WorldModel(BaseModel):
 
         # print(observation_shape[-1])
         # conv_output_dim = 64
+        self.encoder = Encoder(observation_shape=observation_shape, embed_dim=embed_dim)
 
         self.conv1 = nn.Conv2d(4, 48, kernel_size=4, stride=2, padding=1)
         self.conv2 = nn.Conv2d(48, 96, kernel_size=4, stride=2, padding=1)
