@@ -14,7 +14,7 @@ class WorldModel(BaseModel):
         # conv_output_dim = 64
         self.encoder = Encoder(observation_shape=observation_shape, embed_dim=embed_dim)
 
-        self.conv1 = nn.Conv2d(4, 48, kernel_size=4, stride=2, padding=1)
+        self.conv1 = nn.Conv2d(observation_shape[0], 48, kernel_size=4, stride=2, padding=1)
         self.conv2 = nn.Conv2d(48, 96, kernel_size=4, stride=2, padding=1)
         self.conv3 = nn.Conv2d(96, 192, kernel_size=4, stride=2, padding=1)
         self.conv4 = nn.Conv2d(192, 384, kernel_size=4, stride=2, padding=1)

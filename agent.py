@@ -86,8 +86,6 @@ class Agent:
 
         obs = obs.permute(2, 0, 1)
         
-        print(obs.shape)
-
         return obs 
 
 
@@ -335,7 +333,7 @@ class Agent:
 
         for episode in range(episodes):
             obs, _ = self.env.reset()
-            obs = self.process_observation(obs, clear_stack=True)
+            obs = self.process_observation(obs)
             done = False
             episode_reward = 0.0
 
@@ -372,7 +370,7 @@ class Agent:
             
             obs, info = self.env.reset()
 
-            obs = self.process_observation(obs, clear_stack=True)
+            obs = self.process_observation(obs)
 
             done = False
             episode_reward = 0.0
