@@ -163,7 +163,8 @@ class Agent:
         for key, val in avg_loss.items():
             avg_loss[key] = val / epochs
 
-        return avg_loss
+        # Return expected format: combined_loss, reward_loss, action_loss, done_loss, next_frame_loss
+        return avg_loss["world_model"], 0.0, 0.0, 0.0, avg_loss["recon"]
 
     
     def evaluate_policy(self, num_episodes=3):
@@ -303,6 +304,35 @@ class Agent:
 
 
 
+    def evaluate_reconstruction(self, num_samples=4, filename="reconstruction_test.png"):
+        """Evaluate reconstruction quality by comparing original vs reconstructed observations.
+
+        Args:
+            num_samples: Number of observations to reconstruct
+            filename: Output image path
+        """
+        if not self.memory.can_sample(num_samples):
+            return
+
+        # Sample observations from replay buffer
+        obs, _, _, _, _ = self.memory.sample_buffer(num_samples)
+        obs_normalized = obs.float() / 255.0
+
+        with torch.no_grad():
+            # Get reconstructions from world model
+            dummy_action = torch.zeros(num_samples, self.env.action_space.n, device=self.device)
+            recon, _, _, _, _ = self.world_model.forward(obs_normalized, dummy_action)
+
+        # Prepare visualization pairs
+        viz_pairs = []
+        for i in range(num_samples):
+            viz_pairs.append((f"original_{i}", obs_normalized[i].cpu()))
+            viz_pairs.append((f"recon_{i}", recon[i].cpu()))
+
+        # Save comparison image
+        display_stacked_obs(viz_pairs, filename, num_frames=1)
+        print(f"Saved reconstruction comparison to {filename}")
+
     def evaluate_rollout(self, num_steps=8, filename="eval_rollout.png"):
         """Evaluate world model rollout quality over multiple steps.
 
@@ -324,14 +354,14 @@ class Agent:
             for step in range(1, num_steps + 1):
                 # Use a dummy action to get action prediction from world model
                 dummy_action = torch.zeros(1, self.env.action_space.n, device=self.device)
-                _, _, action_logits, _ = self.world_model.forward(current_obs, dummy_action)
+                _, _, _, action_logits, _ = self.world_model.forward(current_obs, dummy_action)
                 action_pred = torch.argmax(action_logits, dim=1)  # [1]
 
                 # Create one-hot action from prediction
                 action_onehot = F.one_hot(action_pred, num_classes=self.env.action_space.n).float()
 
                 # Predict next observation using the predicted action
-                pred_next_obs, _, _, _ = self.world_model.forward(current_obs, action_onehot)
+                pred_next_obs, _, _, _, _ = self.world_model.forward(current_obs, action_onehot)
 
                 # Store the predicted observation
                 rollout_frames.append((f"step_{step}_pred", pred_next_obs.cpu()))
@@ -427,17 +457,17 @@ class Agent:
 
                 obs = next_obs
 
-                if(random.random() < 0.01):
-                    with torch.no_grad():
-                        obs_for_logging = obs.unsqueeze(dim=0).to(self.device)
-                        obs_for_logging = self.normalize_observation(obs_for_logging)
-                        action_onehot = F.one_hot(torch.tensor([action], device=self.device), num_classes=self.env.action_space.n).float()
-                        pred_next_frame, _, _, _ = self.world_model.forward(obs_for_logging, action_onehot)
-                        display_stacked_obs([
-                            ("predicted", pred_next_frame.cpu().detach()),
-                            ("actual",    obs_for_logging.cpu().detach()),
-                        ], "next_frame_pred.png")
-
+                # if(random.random() < 0.01):
+                #     with torch.no_grad():
+                #         obs_for_logging = obs.unsqueeze(dim=0).to(self.device)
+                #         obs_for_logging = self.normalize_observation(obs_for_logging)
+                #         action_onehot = F.one_hot(torch.tensor([action], device=self.device), num_classes=self.env.action_space.n).float()
+                #         pred_next_frame, _, _, _ = self.world_model.forward(obs_for_logging, action_onehot)
+                #         display_stacked_obs([
+                #             ("predicted", pred_next_frame.cpu().detach()),
+                #             ("actual",    obs_for_logging.cpu().detach()),
+                #         ], "next_frame_pred.png")
+                #
 
             # Adjust epsilon. 
             self.epsilon = max(self.min_epsilon, self.epsilon * self.epsilon_decay)
@@ -506,8 +536,13 @@ class Agent:
                 writer.add_scalar("Train/avg_q_loss", episode_loss, episode)
 
             # Evaluate rollout quality once per episode
-            if use_world_model:
-                self.evaluate_rollout(num_steps=8, filename="eval_rollout.png")
+            # Disabled for now while focusing on reconstruction
+            # if use_world_model:
+            #     self.evaluate_rollout(num_steps=8, filename="eval_rollout.png")
+
+            # Evaluate reconstruction quality periodically
+            if use_world_model and episode % 10 == 0:
+                self.evaluate_reconstruction(num_samples=4, filename="reconstruction_test.png")
 
             if episode % 10 == 0:
                 self.save()

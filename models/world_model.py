@@ -13,7 +13,9 @@ class WorldModel(BaseModel):
         # print(observation_shape[-1])
         # conv_output_dim = 64
         self.encoder = Encoder(observation_shape=observation_shape, embed_dim=embed_dim)
-        self.decoder = Decoder(observation_shape=observation_shape, embed_dim=feature_dim)
+        self.decoder = Decoder(observation_shape=observation_shape, embed_dim=feature_dim,
+                               conv_output_shape=self.encoder.get_output_shape(),
+                               conv_channels=self.encoder.get_conv_channels())
 
         self.action_input = nn.Linear(n_actions, action_dim)
 
@@ -27,6 +29,10 @@ class WorldModel(BaseModel):
 
 
     def encode(self, obs):
+        # If obs is [B, C, H, W], add sequence dimension -> [B, 1, C, H, W]
+        if obs.ndim == 4:
+            obs = obs.unsqueeze(1)
+
         batch_size, sequence_length = obs.shape[:2]
         obs_flat = obs.view(batch_size * sequence_length, *obs.shape[2:])
         embed_flat = self.encoder(obs_flat)
@@ -39,11 +45,15 @@ class WorldModel(BaseModel):
         return self.conv_output_shape
 
     def compute_loss(self, obs, actions, rewards, continues):
-       
+
         obs_normalized = obs.float() / 255.0
-        
+
         recon, embeds, reward_pred, action_pred, done_pred = self.forward(obs, actions)
-        
+
+        # Recon is [B, C, H, W], obs_normalized might be [B, C, H, W] or [B, 1, C, H, W]
+        if obs_normalized.ndim == 5:
+            obs_normalized = obs_normalized.squeeze(1)
+
         recon_loss = F.l1_loss(recon, obs_normalized)
 
         combined_loss = recon_loss
@@ -56,7 +66,10 @@ class WorldModel(BaseModel):
     def forward(self, obs, action):
         # x: (B,3,H,W) in [0,1]
         embeds = self.encode(obs)
-        recon = self.decode(obs)
+
+        # Decode from embeddings (squeeze sequence dim for decoder)
+        embeds_flat = embeds.view(-1, embeds.shape[-1])
+        recon = self.decode(embeds_flat)
 
         # Predict action from observation only (before concatenating with action)
         # action_pred = self.action_pred(x)
