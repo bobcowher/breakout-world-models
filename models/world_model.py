@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from models.encoder import Encoder, Decoder
 from models.base import BaseModel
+from models.perceptual_loss import PerceptualLoss
 
 class WorldModel(BaseModel):
 
@@ -24,6 +25,9 @@ class WorldModel(BaseModel):
         self.reward_pred = nn.Linear(embed_dim + action_dim, 1)
         self.action_pred = nn.Linear(embed_dim, n_actions)
         self.done_pred = nn.Linear(embed_dim + action_dim, 1)
+
+        # Perceptual loss for better reconstruction quality
+        self.perceptual_loss = PerceptualLoss()
 
         print(f"VAE network initialized. Input shape: {observation_shape}")
 
@@ -54,12 +58,19 @@ class WorldModel(BaseModel):
         if obs_normalized.ndim == 5:
             obs_normalized = obs_normalized.squeeze(1)
 
-        recon_loss = F.l1_loss(recon, obs_normalized)
+        # Combine MSE and perceptual loss for sharp, detailed reconstructions
+        mse_loss = F.mse_loss(recon, obs_normalized)
+        perceptual = self.perceptual_loss(recon, obs_normalized)
+
+        # Weight perceptual loss lower since it's typically larger magnitude
+        recon_loss = mse_loss + 0.01 * perceptual
 
         combined_loss = recon_loss
 
         return combined_loss, {
             "recon": recon_loss.item(),
+            "mse": mse_loss.item(),
+            "perceptual": perceptual.item(),
         }
 
 

@@ -84,8 +84,9 @@ class Decoder(BaseModel):
         x = F.elu(self.deconv1(x))
         x = F.elu(self.deconv2(x))
         x = F.elu(self.deconv3(x))
-        x = F.elu(self.deconv4(x))
-       
+        # No activation on final layer - let sigmoid handle it
+        x = self.deconv4(x)
+
         return x
 
     def forward(self, x):
