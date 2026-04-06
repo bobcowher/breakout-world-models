@@ -8,7 +8,6 @@ from buffer import ReplayBuffer
 from utils import display_stacked_obs
 from models.world_model import WorldModel
 from models.q_model import QModel
-from models.discriminator import Discriminator
 import cv2
 import torch.nn.functional as F
 from torch.utils.tensorboard.writer import SummaryWriter
@@ -52,11 +51,7 @@ class Agent:
 
         print(f"Observation shape: {obs.shape}")
 
-        # Discriminator for adversarial training of encoder/decoder
-        self.discriminator = Discriminator(input_shape=obs.shape).to(self.device)
-
         self.world_model_optimizer = torch.optim.Adam(self.world_model.parameters(), lr=0.0001)
-        self.discriminator_optimizer = torch.optim.Adam(self.discriminator.parameters(), lr=0.0001)
 
         self.world_model_batch_size = world_model_batch_size
 
@@ -147,68 +142,36 @@ class Agent:
         return states, actions, rewards, next_states, dones
 
     def train_world_model(self, epochs, batch_size):
+        """Train world model using L1 + SSIM reconstruction loss."""
 
-        avg_loss = {"world_model": 0.0,
-                    "recon": 0.0,
-                    "adversarial": 0.0,
-                    "discriminator": 0.0}
+        total_loss = 0.0
+        total_l1 = 0.0
+        total_ssim = 0.0
 
         for _ in range(epochs):
-
             obs, actions, rewards, next_obs, dones = self.memory.sample_buffer(batch_size)
-            obs_normalized = obs.float() / 255.0
 
-            # Get reconstructions from world model
-            recon, embeds, reward_pred, action_pred, done_pred = self.world_model.forward(obs_normalized, actions)
+            # Compute loss (world_model handles normalization internally)
+            loss, loss_dict = self.world_model.compute_loss(obs, actions, rewards, dones)
 
-            # ====== Train Discriminator ======
-            # Real images should be classified as 1
-            real_logits = self.discriminator(obs_normalized)
-            real_loss = F.binary_cross_entropy_with_logits(
-                real_logits, torch.ones_like(real_logits)
-            )
-
-            # Fake images (detached) should be classified as 0
-            fake_logits = self.discriminator(recon.detach())
-            fake_loss = F.binary_cross_entropy_with_logits(
-                fake_logits, torch.zeros_like(fake_logits)
-            )
-
-            d_loss = real_loss + fake_loss
-
-            self.discriminator_optimizer.zero_grad()
-            d_loss.backward()
-            self.discriminator_optimizer.step()
-
-            # ====== Train Generator (Encoder/Decoder) ======
-            # Reconstruction loss (L1)
-            recon_loss = F.l1_loss(recon, obs_normalized)
-
-            # Adversarial loss: want discriminator to think fakes are real
-            fake_logits = self.discriminator(recon)
-            adversarial_loss = F.binary_cross_entropy_with_logits(
-                fake_logits, torch.ones_like(fake_logits)
-            )
-
-            # Combined generator loss with 0.5 weight on adversarial
-            generator_loss = recon_loss + 0.5 * adversarial_loss
-
+            # Optimize
             self.world_model_optimizer.zero_grad()
-            generator_loss.backward()
+            loss.backward()
             self.world_model_optimizer.step()
 
             # Track losses
-            avg_loss["world_model"] += generator_loss.item()
-            avg_loss["recon"] += recon_loss.item()
-            avg_loss["adversarial"] += adversarial_loss.item()
-            avg_loss["discriminator"] += d_loss.item()
+            total_loss += loss.item()
+            total_l1 += loss_dict.get("l1", 0.0)
+            total_ssim += loss_dict.get("ssim", 0.0)
 
-        # Actually average average loss
-        for key, val in avg_loss.items():
-            avg_loss[key] = val / epochs
+        # Average losses
+        avg_loss = total_loss / epochs
+        avg_l1 = total_l1 / epochs
+        avg_ssim = total_ssim / epochs
 
-        # Return expected format: combined_loss, reward_loss, action_loss, done_loss, next_frame_loss
-        return avg_loss["world_model"], 0.0, 0.0, 0.0, avg_loss["recon"]
+        # Return format: combined_loss, reward_loss, action_loss, done_loss, recon_loss
+        # Note: Last two params kept for backwards compatibility but unused
+        return avg_loss, 0.0, 0.0, 0.0, avg_loss
 
     
     def evaluate_policy(self, num_episodes=3):
@@ -418,12 +381,10 @@ class Agent:
 
     def save(self):
         self.world_model.save_the_model("world_model", verbose=True)
-        self.discriminator.save_the_model("discriminator", verbose=True)
         self.q_model.save_the_model("q_model", verbose=True)
 
     def load(self):
         self.world_model.load_the_model("world_model", device=self.device)
-        self.discriminator.load_the_model("discriminator", device=self.device)
         self.q_model.load_the_model("q_model", device=self.device)
         self.target_q_model.load_the_model("q_model", device=self.device)
 
@@ -564,7 +525,7 @@ class Agent:
                 writer.add_scalar("World Model/reward_loss", avg_reward_loss, episode)
                 writer.add_scalar("World Model/action_loss", avg_action_loss, episode)
                 writer.add_scalar("World Model/done_loss", avg_done_loss, episode)
-                writer.add_scalar("World Model/next_frame_loss", avg_next_frame_loss, episode)
+                writer.add_scalar("World Model/reconstruction_loss", avg_next_frame_loss, episode)
                 writer.add_scalar("Train/wm_updates_per_episode", wm_updates, episode)
                 writer.add_scalar("Train/q_updates_per_episode", q_updates, episode)
                 writer.add_scalar("Train/updates_per_cycle_wm", current_ratio[0], episode)

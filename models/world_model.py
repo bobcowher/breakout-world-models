@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from models.encoder import Encoder, Decoder
 from models.base import BaseModel
-from models.perceptual_loss import PerceptualLoss
+from models.ssim_loss import ssim_loss
 
 class WorldModel(BaseModel):
 
@@ -26,10 +26,7 @@ class WorldModel(BaseModel):
         self.action_pred = nn.Linear(embed_dim, n_actions)
         self.done_pred = nn.Linear(embed_dim + action_dim, 1)
 
-        # Perceptual loss for better reconstruction quality
-        self.perceptual_loss = PerceptualLoss()
-
-        print(f"VAE network initialized. Input shape: {observation_shape}")
+        print(f"World Model initialized. Input shape: {observation_shape}")
 
 
     def encode(self, obs):
@@ -58,19 +55,17 @@ class WorldModel(BaseModel):
         if obs_normalized.ndim == 5:
             obs_normalized = obs_normalized.squeeze(1)
 
-        # Combine MSE and perceptual loss for sharp, detailed reconstructions
-        # mse_loss = F.mse_loss(recon, obs_normalized)
-        # perceptual = self.perceptual_loss(recon, obs_normalized)
-        #
-        # Weight perceptual loss lower since it's typically larger magnitude
-        # recon_loss = mse_loss + 0.01 * perceptual
-        #
-        recon_loss = F.l1_loss(recon, obs_normalized)
+        # L1 + SSIM loss for sharp, structurally accurate reconstructions
+        l1_loss = F.l1_loss(recon, obs_normalized)
+        structural_loss = ssim_loss(recon, obs_normalized)
 
-        combined_loss = recon_loss
+        # Combine: 80% pixel accuracy (L1) + 20% structural similarity (SSIM)
+        combined_loss = l1_loss + 0.2 * structural_loss
 
         return combined_loss, {
-            "recon": recon_loss.item(),
+            "recon": combined_loss.item(),
+            "l1": l1_loss.item(),
+            "ssim": structural_loss.item(),
         }
 
 
