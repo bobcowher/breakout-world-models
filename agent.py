@@ -8,6 +8,7 @@ from buffer import ReplayBuffer
 from utils import display_stacked_obs
 from models.world_model import WorldModel
 from models.q_model import QModel
+from models.discriminator import Discriminator
 import cv2
 import torch.nn.functional as F
 from torch.utils.tensorboard.writer import SummaryWriter
@@ -48,10 +49,14 @@ class Agent:
         # print(torch.squeeze(obs).shape)
 
         self.world_model = WorldModel(observation_shape=obs.shape, embed_dim=1024, n_actions=self.env.action_space.n).to(self.device)
-        
+
         print(f"Observation shape: {obs.shape}")
 
+        # Discriminator for adversarial training of encoder/decoder
+        self.discriminator = Discriminator(input_shape=obs.shape).to(self.device)
+
         self.world_model_optimizer = torch.optim.Adam(self.world_model.parameters(), lr=0.0001)
+        self.discriminator_optimizer = torch.optim.Adam(self.discriminator.parameters(), lr=0.0001)
 
         self.world_model_batch_size = world_model_batch_size
 
@@ -77,7 +82,7 @@ class Agent:
     def process_observation(self, obs):
         # obs = torch.tensor(obs, dtype=torch.float32).permute(2,0,1)  
 
-        obs = cv2.resize(obs, (96, 96), interpolation=cv2.INTER_NEAREST) # shrink to 128
+        obs = cv2.resize(obs, (128, 128), interpolation=cv2.INTER_NEAREST)
         # obs = cv2.cvtColor(obs, cv2.COLOR_RGB2GRAY) # let's do grayscale    
         # obs = torch.from_numpy(obs).permute(2, 0, 1).to(self.device)
 
@@ -95,7 +100,7 @@ class Agent:
 
         total_batch_size = batch_size * num_batches
 
-        obs_shape   = obs.shape[1:]  # (4, 96, 96)
+        obs_shape   = obs.shape[1:]  # (3, 128, 128)
         states      = torch.zeros(total_batch_size, *obs_shape)
         actions     = torch.zeros(total_batch_size)
         rewards     = torch.zeros(total_batch_size)
@@ -144,20 +149,59 @@ class Agent:
     def train_world_model(self, epochs, batch_size):
 
         avg_loss = {"world_model": 0.0,
-                      "recon": 0.0}
-        
+                    "recon": 0.0,
+                    "adversarial": 0.0,
+                    "discriminator": 0.0}
+
         for _ in range(epochs):
 
             obs, actions, rewards, next_obs, dones = self.memory.sample_buffer(batch_size)
+            obs_normalized = obs.float() / 255.0
 
-            loss, loss_dict = self.world_model.compute_loss(obs, actions, rewards, dones)
-            
+            # Get reconstructions from world model
+            recon, embeds, reward_pred, action_pred, done_pred = self.world_model.forward(obs_normalized, actions)
+
+            # ====== Train Discriminator ======
+            # Real images should be classified as 1
+            real_logits = self.discriminator(obs_normalized)
+            real_loss = F.binary_cross_entropy_with_logits(
+                real_logits, torch.ones_like(real_logits)
+            )
+
+            # Fake images (detached) should be classified as 0
+            fake_logits = self.discriminator(recon.detach())
+            fake_loss = F.binary_cross_entropy_with_logits(
+                fake_logits, torch.zeros_like(fake_logits)
+            )
+
+            d_loss = real_loss + fake_loss
+
+            self.discriminator_optimizer.zero_grad()
+            d_loss.backward()
+            self.discriminator_optimizer.step()
+
+            # ====== Train Generator (Encoder/Decoder) ======
+            # Reconstruction loss (L1)
+            recon_loss = F.l1_loss(recon, obs_normalized)
+
+            # Adversarial loss: want discriminator to think fakes are real
+            fake_logits = self.discriminator(recon)
+            adversarial_loss = F.binary_cross_entropy_with_logits(
+                fake_logits, torch.ones_like(fake_logits)
+            )
+
+            # Combined generator loss with 0.5 weight on adversarial
+            generator_loss = recon_loss + 0.5 * adversarial_loss
+
             self.world_model_optimizer.zero_grad()
-            loss.backward()
+            generator_loss.backward()
             self.world_model_optimizer.step()
 
-            avg_loss["world_model"] += loss.item()
-            avg_loss["recon"]       += loss_dict["recon"]
+            # Track losses
+            avg_loss["world_model"] += generator_loss.item()
+            avg_loss["recon"] += recon_loss.item()
+            avg_loss["adversarial"] += adversarial_loss.item()
+            avg_loss["discriminator"] += d_loss.item()
 
         # Actually average average loss
         for key, val in avg_loss.items():
@@ -345,7 +389,7 @@ class Agent:
 
         # Sample a starting observation
         obs, _, _, _, _ = self.memory.sample_buffer(1)
-        obs = self.normalize_observation(obs)  # [1, 4, 96, 96]
+        obs = self.normalize_observation(obs)  # [1, 3, 128, 128]
 
         rollout_frames = [("step_0_real", obs.cpu())]
         current_obs = obs
@@ -374,10 +418,12 @@ class Agent:
 
     def save(self):
         self.world_model.save_the_model("world_model", verbose=True)
+        self.discriminator.save_the_model("discriminator", verbose=True)
         self.q_model.save_the_model("q_model", verbose=True)
 
     def load(self):
         self.world_model.load_the_model("world_model", device=self.device)
+        self.discriminator.load_the_model("discriminator", device=self.device)
         self.q_model.load_the_model("q_model", device=self.device)
         self.target_q_model.load_the_model("q_model", device=self.device)
 

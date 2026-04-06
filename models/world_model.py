@@ -59,18 +59,18 @@ class WorldModel(BaseModel):
             obs_normalized = obs_normalized.squeeze(1)
 
         # Combine MSE and perceptual loss for sharp, detailed reconstructions
-        mse_loss = F.mse_loss(recon, obs_normalized)
-        perceptual = self.perceptual_loss(recon, obs_normalized)
-
+        # mse_loss = F.mse_loss(recon, obs_normalized)
+        # perceptual = self.perceptual_loss(recon, obs_normalized)
+        #
         # Weight perceptual loss lower since it's typically larger magnitude
-        recon_loss = mse_loss + 0.01 * perceptual
+        # recon_loss = mse_loss + 0.01 * perceptual
+        #
+        recon_loss = F.l1_loss(recon, obs_normalized)
 
         combined_loss = recon_loss
 
         return combined_loss, {
             "recon": recon_loss.item(),
-            "mse": mse_loss.item(),
-            "perceptual": perceptual.item(),
         }
 
 
