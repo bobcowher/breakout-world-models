@@ -142,17 +142,22 @@ class Agent:
         return states, actions, rewards, next_states, dones
 
     def train_world_model(self, epochs, batch_size):
-        """Train world model using L1 + SSIM reconstruction loss."""
+        """Train world model with reconstruction + dynamics + prediction losses."""
 
         total_loss = 0.0
+        total_recon = 0.0
+        total_dynamics = 0.0
+        total_reward = 0.0
+        total_action = 0.0
+        total_done = 0.0
         total_l1 = 0.0
         total_ssim = 0.0
 
         for _ in range(epochs):
             obs, actions, rewards, next_obs, dones = self.memory.sample_buffer(batch_size)
 
-            # Compute loss (world_model handles normalization internally)
-            loss, loss_dict = self.world_model.compute_loss(obs, actions, rewards, dones)
+            # Compute all losses
+            loss, loss_dict = self.world_model.compute_loss(obs, actions, rewards, next_obs, dones)
 
             # Optimize
             self.world_model_optimizer.zero_grad()
@@ -160,18 +165,27 @@ class Agent:
             self.world_model_optimizer.step()
 
             # Track losses
-            total_loss += loss.item()
-            total_l1 += loss_dict.get("l1", 0.0)
-            total_ssim += loss_dict.get("ssim", 0.0)
+            total_loss += loss_dict["total"]
+            total_recon += loss_dict["recon"]
+            total_dynamics += loss_dict["dynamics"]
+            total_reward += loss_dict["reward"]
+            total_action += loss_dict["action"]
+            total_done += loss_dict["done"]
+            total_l1 += loss_dict["l1"]
+            total_ssim += loss_dict["ssim"]
 
         # Average losses
-        avg_loss = total_loss / epochs
+        avg_total = total_loss / epochs
+        avg_recon = total_recon / epochs
+        avg_dynamics = total_dynamics / epochs
+        avg_reward = total_reward / epochs
+        avg_action = total_action / epochs
+        avg_done = total_done / epochs
         avg_l1 = total_l1 / epochs
         avg_ssim = total_ssim / epochs
 
-        # Return format: combined_loss, reward_loss, action_loss, done_loss, recon_loss
-        # Note: Last two params kept for backwards compatibility but unused
-        return avg_loss, 0.0, 0.0, 0.0, avg_loss
+        # Return format: combined, reward, action, done, recon, dynamics, l1, ssim
+        return avg_total, avg_reward, avg_action, avg_done, avg_recon, avg_dynamics, avg_l1, avg_ssim
 
     
     def evaluate_policy(self, num_episodes=3):
@@ -328,7 +342,7 @@ class Agent:
         with torch.no_grad():
             # Get reconstructions from world model
             dummy_action = torch.zeros(num_samples, self.env.action_space.n, device=self.device)
-            recon, _, _, _, _ = self.world_model.forward(obs_normalized, dummy_action)
+            recon, _, _, _, _, _ = self.world_model.forward(obs_normalized, dummy_action)
 
         # Prepare visualization pairs
         viz_pairs = []
@@ -361,14 +375,14 @@ class Agent:
             for step in range(1, num_steps + 1):
                 # Use a dummy action to get action prediction from world model
                 dummy_action = torch.zeros(1, self.env.action_space.n, device=self.device)
-                _, _, _, action_logits, _ = self.world_model.forward(current_obs, dummy_action)
+                _, _, _, _, action_logits, _ = self.world_model.forward(current_obs, dummy_action)
                 action_pred = torch.argmax(action_logits, dim=1)  # [1]
 
                 # Create one-hot action from prediction
                 action_onehot = F.one_hot(action_pred, num_classes=self.env.action_space.n).float()
 
                 # Predict next observation using the predicted action
-                pred_next_obs, _, _, _, _ = self.world_model.forward(current_obs, action_onehot)
+                pred_next_obs, _, _, _, _, _ = self.world_model.forward(current_obs, action_onehot)
 
                 # Store the predicted observation
                 rollout_frames.append((f"step_{step}_pred", pred_next_obs.cpu()))
@@ -491,6 +505,9 @@ class Agent:
                 total_action_loss = 0
                 total_done_loss = 0
                 total_next_frame_loss = 0
+                total_dynamics_loss = 0
+                total_l1_loss = 0
+                total_ssim_loss = 0
                 total_q_loss = 0
                 wm_updates = 0
                 q_updates = 0
@@ -498,12 +515,15 @@ class Agent:
                 for offline_epoch in range(offline_training_epochs):
                     # World model updates
                     for _ in range(current_ratio[0]):
-                        combined_loss, reward_loss, action_loss, done_loss, next_frame_loss = self.train_world_model(epochs=1, batch_size=wm_batch_size)
+                        combined_loss, reward_loss, action_loss, done_loss, recon_loss, dynamics_loss, l1_loss, ssim_loss = self.train_world_model(epochs=1, batch_size=wm_batch_size)
                         total_combined_loss += combined_loss
                         total_reward_loss += reward_loss
                         total_action_loss += action_loss
                         total_done_loss += done_loss
-                        total_next_frame_loss += next_frame_loss
+                        total_next_frame_loss += recon_loss
+                        total_dynamics_loss += dynamics_loss
+                        total_l1_loss += l1_loss
+                        total_ssim_loss += ssim_loss
                         wm_updates += 1
 
                     # TODO: Re-enable
@@ -519,13 +539,20 @@ class Agent:
                 avg_action_loss = total_action_loss / wm_updates if wm_updates > 0 else 0
                 avg_done_loss = total_done_loss / wm_updates if wm_updates > 0 else 0
                 avg_next_frame_loss = total_next_frame_loss / wm_updates if wm_updates > 0 else 0
+                avg_dynamics_loss = total_dynamics_loss / wm_updates if wm_updates > 0 else 0
+                avg_l1_loss = total_l1_loss / wm_updates if wm_updates > 0 else 0
+                avg_ssim_loss = total_ssim_loss / wm_updates if wm_updates > 0 else 0
                 episode_loss = total_q_loss / q_updates if q_updates > 0 else 0
 
+                # Log all losses
                 writer.add_scalar("World Model/combined_loss", avg_combined_loss, episode)
                 writer.add_scalar("World Model/reward_loss", avg_reward_loss, episode)
                 writer.add_scalar("World Model/action_loss", avg_action_loss, episode)
                 writer.add_scalar("World Model/done_loss", avg_done_loss, episode)
                 writer.add_scalar("World Model/reconstruction_loss", avg_next_frame_loss, episode)
+                writer.add_scalar("World Model/dynamics_loss", avg_dynamics_loss, episode)
+                writer.add_scalar("Reconstruction/l1_loss", avg_l1_loss, episode)
+                writer.add_scalar("Reconstruction/ssim_loss", avg_ssim_loss, episode)
                 writer.add_scalar("Train/wm_updates_per_episode", wm_updates, episode)
                 writer.add_scalar("Train/q_updates_per_episode", q_updates, episode)
                 writer.add_scalar("Train/updates_per_cycle_wm", current_ratio[0], episode)
