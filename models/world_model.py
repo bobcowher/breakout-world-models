@@ -7,10 +7,42 @@ from models.base import BaseModel
 from models.ssim_loss import ssim_loss
 from models.dynamics_model import DynamicsModel
 
+
+def gradient_loss(pred, target):
+    """
+    Compute gradient/edge loss between predicted and target images.
+
+    Preserves high-contrast edges and small objects (like the ball).
+    Computes L1 loss on horizontal and vertical gradients.
+
+    Args:
+        pred: (B, C, H, W) predicted images
+        target: (B, C, H, W) target images
+
+    Returns:
+        scalar gradient loss
+    """
+    # Horizontal gradients (edges)
+    pred_dx = pred[:, :, :, 1:] - pred[:, :, :, :-1]
+    target_dx = target[:, :, :, 1:] - target[:, :, :, :-1]
+
+    # Vertical gradients (edges)
+    pred_dy = pred[:, :, 1:, :] - pred[:, :, :-1, :]
+    target_dy = target[:, :, 1:, :] - target[:, :, :-1, :]
+
+    # L1 loss on gradients
+    loss_dx = F.l1_loss(pred_dx, target_dx)
+    loss_dy = F.l1_loss(pred_dy, target_dy)
+
+    return loss_dx + loss_dy
+
 class WorldModel(BaseModel):
 
-    def __init__(self, observation_shape=(), embed_dim=1024, action_dim=128, n_actions=4, feature_dim=1024):
+    def __init__(self, observation_shape=(), embed_dim=1024, action_dim=128, n_actions=4, feature_dim=None):
         super().__init__()
+
+        if feature_dim is None:
+            feature_dim = embed_dim
 
         # print(observation_shape[-1])
         # conv_output_dim = 64
@@ -87,7 +119,8 @@ class WorldModel(BaseModel):
         # === 1. Reconstruction Loss ===
         l1_loss = F.l1_loss(recon, obs_normalized)
         structural_loss = ssim_loss(recon, obs_normalized)
-        recon_loss = l1_loss + 0.2 * structural_loss
+        edge_loss = gradient_loss(recon, obs_normalized)
+        recon_loss = l1_loss + 0.2 * structural_loss + 0.1 * edge_loss
 
         # === 2. Dynamics Loss ===
         # Encode next observation to get target embedding
@@ -111,7 +144,7 @@ class WorldModel(BaseModel):
 
         # === Combined Loss ===
         combined_loss = (
-            1.0 * recon_loss +
+            2.0 * recon_loss +  # Doubled weight to prioritize reconstruction
             1.0 * dynamics_loss +
             1.0 * reward_loss +
             0.5 * action_loss +
@@ -127,6 +160,7 @@ class WorldModel(BaseModel):
             "done": done_loss.item(),
             "l1": l1_loss.item(),
             "ssim": structural_loss.item(),
+            "edge": edge_loss.item(),
         }
 
 

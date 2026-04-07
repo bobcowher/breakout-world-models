@@ -75,9 +75,9 @@ class Agent:
         return obs / 255.0
 
     def process_observation(self, obs):
-        # obs = torch.tensor(obs, dtype=torch.float32).permute(2,0,1)  
+        # obs = torch.tensor(obs, dtype=torch.float32).permute(2,0,1)
 
-        obs = cv2.resize(obs, (128, 128), interpolation=cv2.INTER_NEAREST)
+        obs = cv2.resize(obs, (96, 96), interpolation=cv2.INTER_NEAREST)
         # obs = cv2.cvtColor(obs, cv2.COLOR_RGB2GRAY) # let's do grayscale    
         # obs = torch.from_numpy(obs).permute(2, 0, 1).to(self.device)
 
@@ -152,6 +152,7 @@ class Agent:
         total_done = 0.0
         total_l1 = 0.0
         total_ssim = 0.0
+        total_edge = 0.0
 
         for _ in range(epochs):
             obs, actions, rewards, next_obs, dones = self.memory.sample_buffer(batch_size)
@@ -173,6 +174,7 @@ class Agent:
             total_done += loss_dict["done"]
             total_l1 += loss_dict["l1"]
             total_ssim += loss_dict["ssim"]
+            total_edge += loss_dict["edge"]
 
         # Average losses
         avg_total = total_loss / epochs
@@ -183,9 +185,10 @@ class Agent:
         avg_done = total_done / epochs
         avg_l1 = total_l1 / epochs
         avg_ssim = total_ssim / epochs
+        avg_edge = total_edge / epochs
 
-        # Return format: combined, reward, action, done, recon, dynamics, l1, ssim
-        return avg_total, avg_reward, avg_action, avg_done, avg_recon, avg_dynamics, avg_l1, avg_ssim
+        # Return format: combined, reward, action, done, recon, dynamics, l1, ssim, edge
+        return avg_total, avg_reward, avg_action, avg_done, avg_recon, avg_dynamics, avg_l1, avg_ssim, avg_edge
 
     
     def evaluate_policy(self, num_episodes=3):
@@ -508,6 +511,7 @@ class Agent:
                 total_dynamics_loss = 0
                 total_l1_loss = 0
                 total_ssim_loss = 0
+                total_edge_loss = 0
                 total_q_loss = 0
                 wm_updates = 0
                 q_updates = 0
@@ -515,7 +519,7 @@ class Agent:
                 for offline_epoch in range(offline_training_epochs):
                     # World model updates
                     for _ in range(current_ratio[0]):
-                        combined_loss, reward_loss, action_loss, done_loss, recon_loss, dynamics_loss, l1_loss, ssim_loss = self.train_world_model(epochs=1, batch_size=wm_batch_size)
+                        combined_loss, reward_loss, action_loss, done_loss, recon_loss, dynamics_loss, l1_loss, ssim_loss, edge_loss = self.train_world_model(epochs=1, batch_size=wm_batch_size)
                         total_combined_loss += combined_loss
                         total_reward_loss += reward_loss
                         total_action_loss += action_loss
@@ -524,6 +528,7 @@ class Agent:
                         total_dynamics_loss += dynamics_loss
                         total_l1_loss += l1_loss
                         total_ssim_loss += ssim_loss
+                        total_edge_loss += edge_loss
                         wm_updates += 1
 
                     # TODO: Re-enable
@@ -542,6 +547,7 @@ class Agent:
                 avg_dynamics_loss = total_dynamics_loss / wm_updates if wm_updates > 0 else 0
                 avg_l1_loss = total_l1_loss / wm_updates if wm_updates > 0 else 0
                 avg_ssim_loss = total_ssim_loss / wm_updates if wm_updates > 0 else 0
+                avg_edge_loss = total_edge_loss / wm_updates if wm_updates > 0 else 0
                 episode_loss = total_q_loss / q_updates if q_updates > 0 else 0
 
                 # Log all losses
@@ -553,6 +559,7 @@ class Agent:
                 writer.add_scalar("World Model/dynamics_loss", avg_dynamics_loss, episode)
                 writer.add_scalar("Reconstruction/l1_loss", avg_l1_loss, episode)
                 writer.add_scalar("Reconstruction/ssim_loss", avg_ssim_loss, episode)
+                writer.add_scalar("Reconstruction/edge_loss", avg_edge_loss, episode)
                 writer.add_scalar("Train/wm_updates_per_episode", wm_updates, episode)
                 writer.add_scalar("Train/q_updates_per_episode", q_updates, episode)
                 writer.add_scalar("Train/updates_per_cycle_wm", current_ratio[0], episode)
