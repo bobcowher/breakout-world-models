@@ -17,17 +17,20 @@ from models.perceptual_loss import PerceptualLoss
 import numpy as np
 
 def get_wm_q_ratio(episode):
-    """Dynamic world model to Q-model training ratio based on episode."""
-    if episode < 50:
-        return [5, 0]   # WM-only: aggressive world model training
-    elif episode < 200:
-        return [5, 1]   # WM-heavy: start Q training
-    elif episode < 500:
+    """Dynamic world model to Q-model training ratio based on episode.
+
+    Optimized for 1200 episode training run with earlier Q learning.
+    """
+    if episode < 25:
+        return [4, 0]   # WM-only: build foundation
+    elif episode < 100:
+        return [3, 1]   # Start Q training earlier
+    elif episode < 300:
         return [2, 2]   # Balanced
-    elif episode < 1500:
-        return [1, 5]   # Q-heavy: world model mature
+    elif episode < 700:
+        return [1, 3]   # Q-heavy: leverage world model
     else:
-        return [1, 10]  # Q-dominant: final policy refinement
+        return [1, 5]   # Q-dominant: final policy refinement (700-1200)
 
 
 class Agent:
@@ -57,8 +60,8 @@ class Agent:
 
         self.next_frame_loss = PerceptualLoss().to(self.device)
 
-        self.q_model = QModel(action_dim=self.env.action_space.n, hidden_dim=256, observation_shape=tuple(obs.shape)).to(self.device)
-        self.target_q_model = QModel(action_dim=self.env.action_space.n, hidden_dim=256, observation_shape=tuple(obs.shape)).to(self.device)
+        self.q_model = QModel(action_dim=self.env.action_space.n, hidden_dim=256, embed_dim=self.world_model.embed_dim).to(self.device)
+        self.target_q_model = QModel(action_dim=self.env.action_space.n, hidden_dim=256, embed_dim=self.world_model.embed_dim).to(self.device)
 
         self.q_model_optimizer = torch.optim.Adam(self.q_model.parameters(), lr=0.0001)
 
@@ -90,48 +93,57 @@ class Agent:
 
 
     def imagine_trajectory(self, batch_size, num_batches):
-        
+        """
+        Imagine trajectory purely in latent space (no decoding).
+
+        Returns embeddings instead of pixel observations.
+        """
         obs, _, _, _, _ = self.memory.sample_buffer(1)
 
         total_batch_size = batch_size * num_batches
 
-        obs_shape   = obs.shape[1:]  # (3, 128, 128)
-        states      = torch.zeros(total_batch_size, *obs_shape)
+        # Store embeddings instead of pixel observations
+        embed_dim = self.world_model.embed_dim
+        states      = torch.zeros(total_batch_size, embed_dim)
         actions     = torch.zeros(total_batch_size)
         rewards     = torch.zeros(total_batch_size)
-        next_states = torch.zeros(total_batch_size, *obs_shape)
+        next_states = torch.zeros(total_batch_size, embed_dim)
         dones       = torch.zeros(total_batch_size)
 
-
         for batch_idx in range(num_batches):
-
             obs, _, _, _, _ = self.memory.sample_buffer(1)
-
             obs = self.normalize_observation(obs)
+
+            # Encode initial observation to latent space
+            with torch.no_grad():
+                embed = self.world_model.encode(obs).squeeze(1)  # (1, embed_dim)
+
             pred_action = None
 
             for step_idx in range(batch_size):
-
                 idx = batch_idx * batch_size + step_idx
+
                 # Select action using world model action prediction with epsilon-greedy
                 with torch.no_grad():
                     if pred_action is None or random.random() < self.epsilon:
                         # First step or explore: random action
-                        action_idx = torch.tensor([random.randint(0, self.env.action_space.n - 1)], device=obs.device)
+                        action_idx = torch.tensor([random.randint(0, self.env.action_space.n - 1)], device=embed.device)
                     else:
                         # Exploit: use world model's action prediction from previous step
                         action_idx = pred_action.argmax(dim=1)
+
                     action_onehot = F.one_hot(action_idx, num_classes=self.env.action_space.n).float()
 
-                next_obs, reward, pred_action, done = self.world_model(obs, action_onehot)
+                    # Imagine step in latent space (no decoding!)
+                    next_embed, reward, pred_action, done = self.world_model.imagine_step(embed, action_onehot)
 
-                states[idx]      = obs.squeeze(0)
-                actions[idx]     = action_idx.item()
-                rewards[idx]     = reward.item()
-                next_states[idx] = next_obs.squeeze(0)
-                dones[idx]       = (torch.sigmoid(done) > 0.5).float().item()
+                    states[idx]      = embed.squeeze(0)
+                    actions[idx]     = action_idx.item()
+                    rewards[idx]     = reward.item()
+                    next_states[idx] = next_embed.squeeze(0)
+                    dones[idx]       = (done > 0.5).float().item()
 
-                obs = next_obs
+                    embed = next_embed
 
         states      = states.to(self.device)
         actions     = actions.to(self.device)
@@ -254,24 +266,33 @@ class Agent:
             # self.world_model.forward() 
 
     def train_q_model_step_live(self, batch_size):
-
+        """Train Q-model on real experiences from replay buffer (in latent space)."""
         if self.memory.can_sample(batch_size):
 
             observations, actions, rewards, next_observations, dones = self.memory.sample_buffer(batch_size)
+
+            # Encode observations to latent space
+            with torch.no_grad():
+                obs_normalized = observations.float() / 255.0
+                next_obs_normalized = next_observations.float() / 255.0
+
+                embeddings = self.world_model.encode(obs_normalized).squeeze(1)  # (B, embed_dim)
+                next_embeddings = self.world_model.encode(next_obs_normalized).squeeze(1)  # (B, embed_dim)
 
             actions = actions.unsqueeze(1).long()
             rewards = rewards.unsqueeze(1)
             dones = dones.unsqueeze(1).float()
 
-            q_values = self.q_model(observations)
+            # Q-learning in latent space
+            q_values = self.q_model(embeddings)
             q_sa     = q_values.gather(1, actions)
 
             with torch.no_grad():
                 next_actions = torch.argmax(
-                    self.q_model(next_observations), dim=1, keepdim=True
+                    self.q_model(next_embeddings), dim=1, keepdim=True
                 )
 
-                next_q = self.target_q_model(next_observations).gather(1, next_actions)
+                next_q = self.target_q_model(next_embeddings).gather(1, next_actions)
                 targets = rewards + (1 - dones) * self.gamma * next_q
 
             loss = F.mse_loss(q_sa, targets)
@@ -289,26 +310,29 @@ class Agent:
 
 
     def train_q_model_on_imagination(self, batch_size, num_batches, epochs=100):
+        """Train Q-model on imagined trajectories (in latent space)."""
 
         total_loss = 0
-        
+
         for epoch in range(epochs):
 
-            observations, actions, rewards, next_observations, dones = self.imagine_trajectory(batch_size, num_batches)
+            # Imagine trajectory in latent space (returns embeddings, not pixels)
+            embeddings, actions, rewards, next_embeddings, dones = self.imagine_trajectory(batch_size, num_batches)
 
             actions = actions.unsqueeze(1).long()
             rewards = rewards.unsqueeze(1)
             dones = dones.unsqueeze(1).float()
 
-            q_values = self.q_model(observations)
+            # Q-learning in latent space
+            q_values = self.q_model(embeddings)
             q_sa     = q_values.gather(1, actions)
 
             with torch.no_grad():
                 next_actions = torch.argmax(
-                    self.q_model(next_observations), dim=1, keepdim=True
+                    self.q_model(next_embeddings), dim=1, keepdim=True
                 )
 
-                next_q = self.target_q_model(next_observations).gather(1, next_actions)
+                next_q = self.target_q_model(next_embeddings).gather(1, next_actions)
                 targets = rewards + (1 - dones) * self.gamma * next_q
 
             loss = F.mse_loss(q_sa, targets)
@@ -416,9 +440,11 @@ class Agent:
             episode_reward = 0.0
 
             while not done:
+                # Encode observation to latent space before Q-model
                 with torch.no_grad():
-                    obs_t = obs.unsqueeze(0).float().to(self.device)
-                    action = self.q_model(obs_t).argmax(dim=1).item()
+                    obs_t = obs.unsqueeze(0).float().to(self.device) / 255.0
+                    embed = self.world_model.encode(obs_t).squeeze(1)  # (1, embed_dim)
+                    action = self.q_model(embed).argmax(dim=1).item()
 
                 next_obs, reward, term, trunc, _ = self.env.step(action)
                 next_obs = self.process_observation(next_obs)
@@ -460,9 +486,11 @@ class Agent:
                 if random.random() < self.epsilon:
                     action = self.env.action_space.sample()
                 else:
+                    # Encode observation to latent space before Q-model
                     with torch.no_grad():
-                        obs_t = obs.unsqueeze(0).float().to(self.device)
-                        action = self.q_model(obs_t).argmax(dim=1).item()
+                        obs_t = obs.unsqueeze(0).float().to(self.device) / 255.0
+                        embed = self.world_model.encode(obs_t).squeeze(1)  # (1, embed_dim)
+                        action = self.q_model(embed).argmax(dim=1).item()
 
                 next_obs, reward, term, trunc, info = self.env.step(action)
 
@@ -531,12 +559,11 @@ class Agent:
                         total_edge_loss += edge_loss
                         wm_updates += 1
 
-                    # TODO: Re-enable
                     # Q-model updates (ratio[1]=0 means no Q training)
-                    # for _ in range(current_ratio[1]):
-                    #     q_loss = self.train_q_model_on_imagination(batch_size, num_batches=num_batches, epochs=1)
-                    #     total_q_loss += q_loss
-                    #     q_updates += 1
+                    for _ in range(current_ratio[1]):
+                        q_loss = self.train_q_model_on_imagination(batch_size, num_batches=num_batches, epochs=1)
+                        total_q_loss += q_loss
+                        q_updates += 1
 
                 # Average the losses
                 avg_combined_loss = total_combined_loss / wm_updates if wm_updates > 0 else 0

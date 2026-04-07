@@ -4,54 +4,50 @@ import torch.nn.functional as F
 from models.base import BaseModel
 
 class QModel(BaseModel):
-    def __init__(self, action_dim, hidden_dim=256, observation_shape=None):
+    def __init__(self, action_dim, hidden_dim=256, embed_dim=1024):
+        """
+        Q-model that operates on latent embeddings instead of raw images.
+
+        Args:
+            action_dim: Number of possible actions
+            hidden_dim: Hidden layer dimension
+            embed_dim: Dimension of world model embeddings (default 1024)
+        """
         super(QModel, self).__init__()
 
-        # CNN layers with a third layer added
-        self.conv1 = nn.Conv2d(in_channels=3, out_channels=32, kernel_size=8, stride=4)
-        self.conv2 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=4, stride=2)
-        self.conv3 = nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, stride=1)  # Third convolutional layer
+        self.embed_dim = embed_dim
 
-        # Calculate CNN output size
-        conv_output_size = self.calculate_conv_output(observation_shape)
-        print("conv_output_size:", conv_output_size)
-
-        # Fully connected layers
-        self.fc1 = nn.Linear(conv_output_size, hidden_dim)
+        # MLP layers for latent embeddings
+        self.fc1 = nn.Linear(embed_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
         self.output = nn.Linear(hidden_dim, action_dim)
 
         # Initialize weights
         self.apply(self.weights_init)
-    
-    def calculate_conv_output(self, observation_shape):
-        x = torch.zeros(1, *observation_shape)
-        x = F.relu(self.conv1(x))
-        x = F.relu(self.conv2(x))             # No pooling after second to control size
-        x = F.relu(self.conv3(x))  # Pooling after third conv layer
 
-        return x.view(-1).shape[0]
+        print(f"Q-Model initialized (latent-based):")
+        print(f"  Input: {embed_dim}-dim embeddings")
+        print(f"  Hidden: {hidden_dim}")
+        print(f"  Output: {action_dim} actions")
 
-    def forward(self, x):
+    def forward(self, embeddings):
+        """
+        Forward pass through Q-network.
 
-        x = x / 255
-        x = F.relu(self.conv1(x))
-        x = F.relu(self.conv2(x))
-        x = F.relu(self.conv3(x)) # Pooling after third conv layer
-        x = x.view(x.size(0), -1)  # Flatten
-        
-        # Fully connected layers with optional dropout
-        x = F.relu(self.fc1(x))
-        
-        output = self.output(x)
+        Args:
+            embeddings: (B, embed_dim) latent embeddings from world model
 
-        return output
+        Returns:
+            q_values: (B, action_dim) Q-values for each action
+        """
+        x = F.relu(self.fc1(embeddings))
+        x = F.relu(self.fc2(x))
+        q_values = self.output(x)
+
+        return q_values
 
     def weights_init(self, m):
-        if isinstance(m, nn.Conv2d):
-            nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.Linear):
+        if isinstance(m, nn.Linear):
             nn.init.xavier_normal_(m.weight)
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
@@ -64,5 +60,3 @@ def soft_update(target, source, tau=0.005):
 def hard_update(target, source):
     for target_param, param in zip(target.parameters(), source.parameters()):
         target_param.data.copy_(param.data)
-
-

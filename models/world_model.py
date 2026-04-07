@@ -83,7 +83,33 @@ class WorldModel(BaseModel):
 
     def decode(self, embeds):
         return self.decoder(embeds)
-        return self.conv_output_shape
+
+    def imagine_step(self, embed, action_onehot):
+        """
+        Imagination step in latent space (no decoding).
+
+        Args:
+            embed: (B, embed_dim) current state embedding
+            action_onehot: (B, n_actions) one-hot encoded action
+
+        Returns:
+            next_embed: (B, embed_dim) predicted next state embedding
+            reward: (B, 1) predicted reward
+            action_pred: (B, n_actions) predicted action logits
+            done: (B, 1) predicted done probability
+        """
+        # Predict next embedding
+        next_embed = self.dynamics(embed, action_onehot)
+
+        # Predict reward and done
+        embed_action = torch.cat([embed, action_onehot], dim=-1)
+        reward = torch.tanh(self.reward_pred(embed_action))
+        done = torch.sigmoid(self.done_pred(embed_action))
+
+        # Predict action from next state
+        action_pred = self.action_pred(next_embed)
+
+        return next_embed, reward, action_pred, done
 
     def compute_loss(self, obs, actions, rewards, next_obs, dones):
         """
