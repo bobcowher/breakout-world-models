@@ -19,18 +19,17 @@ import numpy as np
 def get_wm_q_ratio(episode):
     """Dynamic world model to Q-model training ratio based on episode.
 
-    Optimized for 1200 episode training run with earlier Q learning.
+    Optimized for 1200 episode training run with aggressive Q learning.
+    World model stabilizes around episode 250, so maximize Q learning after that.
     """
     if episode < 25:
         return [4, 0]   # WM-only: build foundation
     elif episode < 100:
-        return [3, 1]   # Start Q training earlier
-    elif episode < 300:
-        return [2, 2]   # Balanced
-    elif episode < 700:
-        return [1, 3]   # Q-heavy: leverage world model
+        return [3, 1]   # Start Q training
+    elif episode < 250:
+        return [2, 2]   # Balanced: let WM stabilize
     else:
-        return [1, 5]   # Q-dominant: final policy refinement (700-1200)
+        return [1, 5]   # Q-dominant: 950 episodes of intensive Q learning (250-1200)
 
 
 class Agent:
