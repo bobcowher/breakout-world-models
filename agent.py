@@ -299,6 +299,7 @@ class Agent:
 
             self.q_model_optimizer.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.q_model.parameters(), max_norm=1.0)
             self.q_model_optimizer.step()
 
             if self.total_steps % self.target_update_interval == 0:
@@ -339,6 +340,7 @@ class Agent:
 
             self.q_model_optimizer.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.q_model.parameters(), max_norm=1.0)
             self.q_model_optimizer.step()
 
             if self.total_steps % self.target_update_interval == 0:
