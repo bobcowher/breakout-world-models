@@ -69,8 +69,8 @@ class Agent:
         self.gamma = 0.99
 
         self.epsilon = 1
-        self.min_epsilon = 0.1
-        self.epsilon_decay = 0.995
+        self.min_epsilon = 0.01
+        self.epsilon_decay = 0.98
         self.total_steps = 0
     
     def normalize_observation(self, obs):
