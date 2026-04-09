@@ -49,7 +49,7 @@ class Agent:
 
         # print(torch.squeeze(obs).shape)
 
-        self.world_model = WorldModel(observation_shape=obs.shape, embed_dim=1024, n_actions=self.env.action_space.n).to(self.device)
+        self.world_model = WorldModel(observation_shape=obs.shape, embed_dim=1024, n_actions=self.env.action_space.n, embed_norm='layernorm').to(self.device)
 
         print(f"Observation shape: {obs.shape}")
 

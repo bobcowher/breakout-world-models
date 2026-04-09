@@ -38,7 +38,16 @@ def gradient_loss(pred, target):
 
 class WorldModel(BaseModel):
 
-    def __init__(self, observation_shape=(), embed_dim=1024, action_dim=128, n_actions=4, feature_dim=None):
+    def __init__(self, observation_shape=(), embed_dim=1024, action_dim=128, n_actions=4, feature_dim=None,
+                 embed_norm='layernorm'):
+        """
+        Args:
+            embed_norm: Normalization strategy for embeddings. Options:
+                - 'layernorm': Layer normalization (default, most stable)
+                - 'tanh': Tanh activation (bounds to [-1, 1])
+                - 'l2': L2 normalization (projects to unit sphere)
+                - None: No normalization (original behavior)
+        """
         super().__init__()
 
         if feature_dim is None:
@@ -55,6 +64,13 @@ class WorldModel(BaseModel):
         # Dynamics model - predicts next embedding from current embedding + action
         self.dynamics = DynamicsModel(embed_dim=embed_dim, n_actions=n_actions, hidden_dim=512)
 
+        # Embedding normalization (applied after encoder and dynamics)
+        self.embed_norm_type = embed_norm
+        if embed_norm == 'layernorm':
+            self.embed_norm_layer = nn.LayerNorm(embed_dim)
+        else:
+            self.embed_norm_layer = None
+
         # Prediction heads
         self.reward_pred = nn.Linear(embed_dim + n_actions, 1)  # embed + action → reward
         self.action_pred = nn.Linear(embed_dim, n_actions)      # embed → action logits
@@ -65,9 +81,32 @@ class WorldModel(BaseModel):
 
         print(f"World Model initialized. Input shape: {observation_shape}")
         print(f"  Embed dim: {embed_dim}")
+        print(f"  Embed normalization: {embed_norm}")
         print(f"  Dynamics: embed + action → next_embed")
         print(f"  Prediction heads: reward, action, done")
 
+
+    def normalize_embedding(self, embed):
+        """
+        Apply normalization to embeddings for stability.
+
+        Args:
+            embed: (..., embed_dim) embeddings
+
+        Returns:
+            normalized embeddings with same shape
+        """
+        if self.embed_norm_type is None:
+            return embed
+        elif self.embed_norm_type == 'layernorm':
+            return self.embed_norm_layer(embed)
+        elif self.embed_norm_type == 'tanh':
+            return torch.tanh(embed)
+        elif self.embed_norm_type == 'l2':
+            # L2 normalize to unit sphere
+            return F.normalize(embed, p=2, dim=-1)
+        else:
+            raise ValueError(f"Unknown embed_norm_type: {self.embed_norm_type}")
 
     def encode(self, obs):
         # If obs is [B, C, H, W], add sequence dimension -> [B, 1, C, H, W]
@@ -77,6 +116,10 @@ class WorldModel(BaseModel):
         batch_size, sequence_length = obs.shape[:2]
         obs_flat = obs.view(batch_size * sequence_length, *obs.shape[2:])
         embed_flat = self.encoder(obs_flat)
+
+        # Normalize embeddings
+        embed_flat = self.normalize_embedding(embed_flat)
+
         embeds = embed_flat.view(batch_size, sequence_length, -1)
 
         return embeds
@@ -98,8 +141,9 @@ class WorldModel(BaseModel):
             action_pred: (B, n_actions) predicted action logits
             done: (B, 1) predicted done probability
         """
-        # Predict next embedding
+        # Predict next embedding and normalize it
         next_embed = self.dynamics(embed, action_onehot)
+        next_embed = self.normalize_embedding(next_embed)
 
         # Predict reward and done
         embed_action = torch.cat([embed, action_onehot], dim=-1)
@@ -216,8 +260,9 @@ class WorldModel(BaseModel):
         # Flatten embeddings for predictions
         embed = embeds_flat  # (B, embed_dim)
 
-        # Predict next embedding using dynamics model
+        # Predict next embedding using dynamics model and normalize it
         next_embed_pred = self.dynamics(embed, action_onehot)  # (B, embed_dim)
+        next_embed_pred = self.normalize_embedding(next_embed_pred)
 
         # Predict action from current state (policy)
         action_pred = self.action_pred(embed)  # (B, n_actions)
