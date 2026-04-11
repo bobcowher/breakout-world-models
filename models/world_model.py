@@ -73,7 +73,6 @@ class WorldModel(BaseModel):
 
         # Prediction heads
         self.reward_pred = nn.Linear(embed_dim + n_actions, 1)  # embed + action → reward
-        self.action_pred = nn.Linear(embed_dim, n_actions)      # embed → action logits
         self.done_pred = nn.Linear(embed_dim + n_actions, 1)    # embed + action → done probability
 
         self.embed_dim = embed_dim
@@ -83,7 +82,7 @@ class WorldModel(BaseModel):
         print(f"  Embed dim: {embed_dim}")
         print(f"  Embed normalization: {embed_norm}")
         print(f"  Dynamics: embed + action → next_embed")
-        print(f"  Prediction heads: reward, action, done")
+        print(f"  Prediction heads: reward, done")
 
 
     def normalize_embedding(self, embed):
@@ -138,7 +137,6 @@ class WorldModel(BaseModel):
         Returns:
             next_embed: (B, embed_dim) predicted next state embedding
             reward: (B, 1) predicted reward
-            action_pred: (B, n_actions) predicted action logits
             done: (B, 1) predicted done probability
         """
         # Predict next embedding and normalize it
@@ -150,10 +148,7 @@ class WorldModel(BaseModel):
         reward = torch.tanh(self.reward_pred(embed_action))
         done = torch.sigmoid(self.done_pred(embed_action))
 
-        # Predict action from next state
-        action_pred = self.action_pred(next_embed)
-
-        return next_embed, reward, action_pred, done
+        return next_embed, reward, done
 
     def compute_loss(self, obs, actions, rewards, next_obs, dones):
         """
@@ -184,7 +179,7 @@ class WorldModel(BaseModel):
         action_onehot = F.one_hot(actions.long(), num_classes=self.n_actions).float()
 
         # Forward pass
-        recon, embeds, next_embed_pred, reward_pred, action_pred, done_pred = self.forward(obs_normalized, action_onehot)
+        recon, embeds, next_embed_pred, reward_pred, done_pred = self.forward(obs_normalized, action_onehot)
 
         # === 1. Reconstruction Loss ===
         l1_loss = F.l1_loss(recon, obs_normalized)
@@ -204,11 +199,7 @@ class WorldModel(BaseModel):
         # Reward is in range [-1, 0, 1] after life penalty
         reward_loss = F.mse_loss(reward_pred.squeeze(-1), rewards.float())
 
-        # === 4. Action Loss ===
-        # Predict what action was actually taken (inverse model)
-        action_loss = F.cross_entropy(action_pred, actions.long())
-
-        # === 5. Done Loss ===
+        # === 4. Done Loss ===
         # Binary classification
         done_loss = F.binary_cross_entropy(done_pred.squeeze(-1), dones.float())
 
@@ -217,7 +208,6 @@ class WorldModel(BaseModel):
             2.0 * recon_loss +  # Doubled weight to prioritize reconstruction
             1.0 * dynamics_loss +
             1.0 * reward_loss +
-            0.5 * action_loss +
             0.5 * done_loss
         )
 
@@ -226,7 +216,6 @@ class WorldModel(BaseModel):
             "recon": recon_loss.item(),
             "dynamics": dynamics_loss.item(),
             "reward": reward_loss.item(),
-            "action": action_loss.item(),
             "done": done_loss.item(),
             "l1": l1_loss.item(),
             "ssim": structural_loss.item(),
@@ -247,7 +236,6 @@ class WorldModel(BaseModel):
             embeds: (B, 1, embed_dim) current state embeddings
             next_embed_pred: (B, embed_dim) predicted next state embedding
             reward_pred: (B, 1) predicted reward
-            action_pred: (B, n_actions) predicted action logits
             done_pred: (B, 1) predicted done probability
         """
         # Encode observation to latent state
@@ -264,9 +252,6 @@ class WorldModel(BaseModel):
         next_embed_pred = self.dynamics(embed, action_onehot)  # (B, embed_dim)
         next_embed_pred = self.normalize_embedding(next_embed_pred)
 
-        # Predict action from current state (policy)
-        action_pred = self.action_pred(embed)  # (B, n_actions)
-
         # Predict reward from current state + action
         embed_action = torch.cat([embed, action_onehot], dim=-1)
         reward_pred = torch.tanh(self.reward_pred(embed_action))  # (B, 1) in [-1, 1]
@@ -274,7 +259,7 @@ class WorldModel(BaseModel):
         # Predict done from current state + action
         done_pred = torch.sigmoid(self.done_pred(embed_action))  # (B, 1) in [0, 1]
 
-        return recon, embeds, next_embed_pred, reward_pred, action_pred, done_pred
+        return recon, embeds, next_embed_pred, reward_pred, done_pred
     
 
 

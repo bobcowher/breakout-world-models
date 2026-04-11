@@ -1,9 +1,6 @@
+import os
 import gymnasium as gym
-from collections import deque
-import time
 import torch
-from torch._dynamo.utils import torchscript
-from torch.cuda import device_count
 from buffer import ReplayBuffer
 from utils import display_stacked_obs
 from models.world_model import WorldModel
@@ -14,7 +11,6 @@ from torch.utils.tensorboard.writer import SummaryWriter
 import datetime
 import random
 from models.perceptual_loss import PerceptualLoss
-import numpy as np
 
 def get_wm_q_ratio(episode):
     """Dynamic world model to Q-model training ratio based on episode.
@@ -40,6 +36,9 @@ class Agent:
                        target_update_interval = 10000) -> None:
         self.env = env
         self.device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+
+        os.makedirs("checkpoints", exist_ok=True)
+        os.makedirs("runs", exist_ok=True)
 
         obs, info = self.env.reset()
 
@@ -117,24 +116,20 @@ class Agent:
             with torch.no_grad():
                 embed = self.world_model.encode(obs).squeeze(1)  # (1, embed_dim)
 
-            pred_action = None
-
             for step_idx in range(batch_size):
                 idx = batch_idx * batch_size + step_idx
 
-                # Select action using world model action prediction with epsilon-greedy
+                # Select action using Q model with epsilon-greedy
                 with torch.no_grad():
-                    if pred_action is None or random.random() < self.epsilon:
-                        # First step or explore: random action
+                    if random.random() < self.epsilon:
                         action_idx = torch.tensor([random.randint(0, self.env.action_space.n - 1)], device=embed.device)
                     else:
-                        # Exploit: use world model's action prediction from previous step
-                        action_idx = pred_action.argmax(dim=1)
+                        action_idx = self.q_model(embed).argmax(dim=1)
 
                     action_onehot = F.one_hot(action_idx, num_classes=self.env.action_space.n).float()
 
                     # Imagine step in latent space (no decoding!)
-                    next_embed, reward, pred_action, done = self.world_model.imagine_step(embed, action_onehot)
+                    next_embed, reward, done = self.world_model.imagine_step(embed, action_onehot)
 
                     states[idx]      = embed.squeeze(0)
                     actions[idx]     = action_idx.item()
@@ -159,7 +154,6 @@ class Agent:
         total_recon = 0.0
         total_dynamics = 0.0
         total_reward = 0.0
-        total_action = 0.0
         total_done = 0.0
         total_l1 = 0.0
         total_ssim = 0.0
@@ -181,7 +175,6 @@ class Agent:
             total_recon += loss_dict["recon"]
             total_dynamics += loss_dict["dynamics"]
             total_reward += loss_dict["reward"]
-            total_action += loss_dict["action"]
             total_done += loss_dict["done"]
             total_l1 += loss_dict["l1"]
             total_ssim += loss_dict["ssim"]
@@ -192,78 +185,15 @@ class Agent:
         avg_recon = total_recon / epochs
         avg_dynamics = total_dynamics / epochs
         avg_reward = total_reward / epochs
-        avg_action = total_action / epochs
         avg_done = total_done / epochs
         avg_l1 = total_l1 / epochs
         avg_ssim = total_ssim / epochs
         avg_edge = total_edge / epochs
 
-        # Return format: combined, reward, action, done, recon, dynamics, l1, ssim, edge
-        return avg_total, avg_reward, avg_action, avg_done, avg_recon, avg_dynamics, avg_l1, avg_ssim, avg_edge
+        # Return format: combined, reward, done, recon, dynamics, l1, ssim, edge
+        return avg_total, avg_reward, avg_done, avg_recon, avg_dynamics, avg_l1, avg_ssim, avg_edge
 
     
-    def evaluate_policy(self, num_episodes=3):
-        total_reward = 0
-        
-        for _ in range(num_episodes):
-            obs, _ = self.env.reset()
-            obs = self.process_observation(obs)
-            done = False
-            episode_reward = 0
-            
-            h, z = self.world_model.get_initial_state(1)
-
-            prev_action = np.zeros(3, dtype=np.float32)
-            
-            while not done:
-
-                action, h, z = self.get_action(obs, h, z, prev_action)
-                
-                obs, reward, done, truncated, _ = self.env.step(action)
-                obs = self.process_observation(obs)
-                done = done or truncated
-                episode_reward += float(reward)
-
-                prev_action = action
-                
-                if done:
-                    pass
-                    # Only print the last action, for log purposes. 
-
-            self.world_model_optimizer.zero_grad()
-            combined_loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.world_model.parameters(), max_norm=1.0)
-            self.world_model_optimizer.step()
-
-            # Just for stats.
-            total_reward_loss += reward_loss.item()
-            total_action_loss += action_loss.item()
-            total_done_loss += done_loss.item()
-            total_next_frame_loss += next_frame_loss.item()
-            total_combined_loss += combined_loss.item()
-
-        avg_combined_loss    = total_combined_loss / epochs
-        avg_reward_loss      = total_reward_loss / epochs
-        avg_action_loss      = total_action_loss / epochs
-        avg_done_loss        = total_done_loss / epochs
-        avg_next_frame_loss  = total_next_frame_loss / epochs
-
-        return avg_combined_loss, avg_reward_loss, avg_action_loss, avg_done_loss, avg_next_frame_loss
-        
-
-            # Training
-            # logits = self.reward_head(x)          # [batch, 1]
-            # loss = nn.BCEWithLogitsLoss()(logits.squeeze(-1), reward.float())
-            #
-            # # Inference - hard
-            # pred_reward = (logits.sigmoid() > 0.5).long().squeeze(-1)  # {0, 1}
-            #
-            # # Inference - soft (preferred for world model rollouts)
-            # expected_reward = logits.sigmoid().squeeze(-1)  # continuous (0, 1)
-            # pass
-
-            # self.world_model.forward() 
-
     def train_q_model_step_live(self, batch_size):
         """Train Q-model on real experiences from replay buffer (in latent space)."""
         if self.memory.can_sample(batch_size):
@@ -370,7 +300,7 @@ class Agent:
         with torch.no_grad():
             # Get reconstructions from world model
             dummy_action = torch.zeros(num_samples, self.env.action_space.n, device=self.device)
-            recon, _, _, _, _, _ = self.world_model.forward(obs_normalized, dummy_action)
+            recon, _, _, _, _ = self.world_model.forward(obs_normalized, dummy_action)
 
         # Prepare visualization pairs
         viz_pairs = []
@@ -401,16 +331,13 @@ class Agent:
 
         with torch.no_grad():
             for step in range(1, num_steps + 1):
-                # Use a dummy action to get action prediction from world model
-                dummy_action = torch.zeros(1, self.env.action_space.n, device=self.device)
-                _, _, _, _, action_logits, _ = self.world_model.forward(current_obs, dummy_action)
-                action_pred = torch.argmax(action_logits, dim=1)  # [1]
+                # Use Q model to select action in latent space
+                embed = self.world_model.encode(current_obs).squeeze(1)  # (1, embed_dim)
+                action_idx = self.q_model(embed).argmax(dim=1)
+                action_onehot = F.one_hot(action_idx, num_classes=self.env.action_space.n).float()
 
-                # Create one-hot action from prediction
-                action_onehot = F.one_hot(action_pred, num_classes=self.env.action_space.n).float()
-
-                # Predict next observation using the predicted action
-                pred_next_obs, _, _, _, _, _ = self.world_model.forward(current_obs, action_onehot)
+                # Predict next observation using the selected action
+                pred_next_obs, _, _, _, _ = self.world_model.forward(current_obs, action_onehot)
 
                 # Store the predicted observation
                 rollout_frames.append((f"step_{step}_pred", pred_next_obs.cpu()))
@@ -534,7 +461,6 @@ class Agent:
 
                 total_combined_loss = 0
                 total_reward_loss = 0
-                total_action_loss = 0
                 total_done_loss = 0
                 total_next_frame_loss = 0
                 total_dynamics_loss = 0
@@ -548,10 +474,9 @@ class Agent:
                 for offline_epoch in range(offline_training_epochs):
                     # World model updates
                     for _ in range(current_ratio[0]):
-                        combined_loss, reward_loss, action_loss, done_loss, recon_loss, dynamics_loss, l1_loss, ssim_loss, edge_loss = self.train_world_model(epochs=1, batch_size=wm_batch_size)
+                        combined_loss, reward_loss, done_loss, recon_loss, dynamics_loss, l1_loss, ssim_loss, edge_loss = self.train_world_model(epochs=1, batch_size=wm_batch_size)
                         total_combined_loss += combined_loss
                         total_reward_loss += reward_loss
-                        total_action_loss += action_loss
                         total_done_loss += done_loss
                         total_next_frame_loss += recon_loss
                         total_dynamics_loss += dynamics_loss
@@ -569,7 +494,6 @@ class Agent:
                 # Average the losses
                 avg_combined_loss = total_combined_loss / wm_updates if wm_updates > 0 else 0
                 avg_reward_loss = total_reward_loss / wm_updates if wm_updates > 0 else 0
-                avg_action_loss = total_action_loss / wm_updates if wm_updates > 0 else 0
                 avg_done_loss = total_done_loss / wm_updates if wm_updates > 0 else 0
                 avg_next_frame_loss = total_next_frame_loss / wm_updates if wm_updates > 0 else 0
                 avg_dynamics_loss = total_dynamics_loss / wm_updates if wm_updates > 0 else 0
@@ -581,7 +505,6 @@ class Agent:
                 # Log all losses
                 writer.add_scalar("World Model/combined_loss", avg_combined_loss, episode)
                 writer.add_scalar("World Model/reward_loss", avg_reward_loss, episode)
-                writer.add_scalar("World Model/action_loss", avg_action_loss, episode)
                 writer.add_scalar("World Model/done_loss", avg_done_loss, episode)
                 writer.add_scalar("World Model/reconstruction_loss", avg_next_frame_loss, episode)
                 writer.add_scalar("World Model/dynamics_loss", avg_dynamics_loss, episode)
