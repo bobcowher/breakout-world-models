@@ -205,7 +205,7 @@ class WorldModel(BaseModel):
 
         # === Combined Loss ===
         combined_loss = (
-            2.0 * recon_loss +  # Doubled weight to prioritize reconstruction
+            1.0 * recon_loss +
             1.0 * dynamics_loss +
             1.0 * reward_loss +
             0.5 * done_loss
