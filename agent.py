@@ -388,12 +388,14 @@ class Agent:
         self.q_model.train()
         return total_rewards
 
-    def train(self, episodes=1, offline_training_epochs=1, summary_writer_suffix="_wm", batch_size=1, num_batches=1, wm_batch_size=1, use_world_model=False):
+    def train(self, episodes=1, offline_training_epochs=1, summary_writer_suffix="_wm", batch_size=1, num_batches=1, wm_batch_size=1, use_world_model=False, imagination_steps=None):
+
+        rollout_steps = imagination_steps if imagination_steps is not None else batch_size
 
         if use_world_model:
-            run_tag = f'world_model_ote{offline_training_epochs}_dynamic_ratio_bs{batch_size}_wmbs_{wm_batch_size}'
+            run_tag = f'world_model_ote{offline_training_epochs}_bs{batch_size}_wmbs{wm_batch_size}_rollout{rollout_steps}_buf{self.memory.mem_size}'
         else:
-            run_tag = f'live_bs{batch_size}'
+            run_tag = f'live_bs{batch_size}_buf{self.memory.mem_size}'
         summary_writer_name = f'runs/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}_{run_tag}'
 
         writer = SummaryWriter(summary_writer_name)
@@ -487,7 +489,7 @@ class Agent:
 
                     # Q-model updates (ratio[1]=0 means no Q training)
                     for _ in range(current_ratio[1]):
-                        q_loss = self.train_q_model_on_imagination(batch_size, num_batches=num_batches, epochs=1)
+                        q_loss = self.train_q_model_on_imagination(rollout_steps, num_batches=num_batches, epochs=1)
                         total_q_loss += q_loss
                         q_updates += 1
 
