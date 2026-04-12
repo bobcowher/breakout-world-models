@@ -525,8 +525,10 @@ class Agent:
 
                 if q_updates > 0:
                     avg_imag_reward = total_imag_reward / q_updates
+                    real_reward_per_step = episode_reward / episode_steps if episode_steps > 0 else 0.0
                     writer.add_scalar("Imagination/mean_reward_per_step", avg_imag_reward, episode)
-                    writer.add_scalar("Imagination/vs_real_reward_diff", avg_imag_reward - episode_reward, episode)
+                    writer.add_scalar("Imagination/real_reward_per_step", real_reward_per_step, episode)
+                    writer.add_scalar("Imagination/vs_real_reward_diff", avg_imag_reward - real_reward_per_step, episode)
 
                 if episode % 100 == 0:
                     print(f"Completed episode {episode} - Reward loss: {avg_reward_loss}")
