@@ -194,49 +194,6 @@ class Agent:
         return avg_total, avg_reward, avg_done, avg_recon, avg_dynamics, avg_l1, avg_ssim, avg_edge
 
     
-    def train_q_model_step_live(self, batch_size):
-        """Train Q-model on real experiences from replay buffer (in latent space)."""
-        if self.memory.can_sample(batch_size):
-
-            observations, actions, rewards, next_observations, dones = self.memory.sample_buffer(batch_size)
-
-            # Encode observations to latent space
-            with torch.no_grad():
-                obs_normalized = observations.float() / 255.0
-                next_obs_normalized = next_observations.float() / 255.0
-
-                embeddings = self.world_model.encode(obs_normalized).squeeze(1)  # (B, embed_dim)
-                next_embeddings = self.world_model.encode(next_obs_normalized).squeeze(1)  # (B, embed_dim)
-
-            actions = actions.unsqueeze(1).long()
-            rewards = rewards.unsqueeze(1)
-            dones = dones.unsqueeze(1).float()
-
-            # Q-learning in latent space
-            q_values = self.q_model(embeddings)
-            q_sa     = q_values.gather(1, actions)
-
-            with torch.no_grad():
-                next_actions = torch.argmax(
-                    self.q_model(next_embeddings), dim=1, keepdim=True
-                )
-
-                next_q = self.target_q_model(next_embeddings).gather(1, next_actions)
-                targets = rewards + (1 - dones) * self.gamma * next_q
-
-            loss = F.mse_loss(q_sa, targets)
-
-            self.q_model_optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.q_model.parameters(), max_norm=1.0)
-            self.q_model_optimizer.step()
-
-            if self.total_steps % self.target_update_interval == 0:
-                self.target_q_model.load_state_dict(self.q_model.state_dict())
-
-            self.total_steps += 1
-
-        return loss.item()
 
 
     def train_q_model_on_imagination(self, batch_size, num_batches, epochs=100):
@@ -391,14 +348,11 @@ class Agent:
         self.q_model.train()
         return total_rewards
 
-    def train(self, episodes=1, offline_training_epochs=1, summary_writer_suffix="_wm", batch_size=1, num_batches=1, wm_batch_size=1, use_world_model=False, imagination_steps=None):
+    def train(self, episodes=1, offline_training_epochs=1, batch_size=1, num_batches=1, wm_batch_size=1, imagination_steps=None):
 
         rollout_steps = imagination_steps if imagination_steps is not None else batch_size
 
-        if use_world_model:
-            run_tag = f'world_model_ote{offline_training_epochs}_bs{batch_size}_wmbs{wm_batch_size}_rollout{rollout_steps}_buf{self.memory.mem_size}'
-        else:
-            run_tag = f'live_bs{batch_size}_buf{self.memory.mem_size}'
+        run_tag = f'world_model_ote{offline_training_epochs}_bs{batch_size}_wmbs{wm_batch_size}_rollout{rollout_steps}_buf{self.memory.mem_size}'
         summary_writer_name = f'runs/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}_{run_tag}'
 
         writer = SummaryWriter(summary_writer_name)
@@ -436,23 +390,7 @@ class Agent:
                 episode_reward += reward
                 episode_steps += 1
 
-                # Do live training, if we're not using the world model.
-                if self.memory.can_sample(batch_size) and not use_world_model:
-                        episode_loss += self.train_q_model_step_live(batch_size)
-
                 obs = next_obs
-
-                # if(random.random() < 0.01):
-                #     with torch.no_grad():
-                #         obs_for_logging = obs.unsqueeze(dim=0).to(self.device)
-                #         obs_for_logging = self.normalize_observation(obs_for_logging)
-                #         action_onehot = F.one_hot(torch.tensor([action], device=self.device), num_classes=self.env.action_space.n).float()
-                #         pred_next_frame, _, _, _ = self.world_model.forward(obs_for_logging, action_onehot)
-                #         display_stacked_obs([
-                #             ("predicted", pred_next_frame.cpu().detach()),
-                #             ("actual",    obs_for_logging.cpu().detach()),
-                #         ], "next_frame_pred.png")
-                #
 
             # Adjust epsilon. 
             self.epsilon = max(self.min_epsilon, self.epsilon * self.epsilon_decay)
@@ -460,94 +398,83 @@ class Agent:
             # Log stats for the current training iteration 
             print(f"Episode {episode} | reward: {episode_reward:.1f} | epsilon: {self.epsilon:.3f} | steps: {episode_steps}")
 
-            if use_world_model:
-                # Interleaved training with dynamic wm_q_ratio
-                current_ratio = get_wm_q_ratio(episode)
+            # Interleaved training with dynamic wm_q_ratio
+            current_ratio = get_wm_q_ratio(episode)
 
-                total_combined_loss = 0
-                total_reward_loss = 0
-                total_done_loss = 0
-                total_next_frame_loss = 0
-                total_dynamics_loss = 0
-                total_l1_loss = 0
-                total_ssim_loss = 0
-                total_edge_loss = 0
-                total_q_loss = 0
-                total_imag_reward = 0
-                wm_updates = 0
-                q_updates = 0
+            total_combined_loss = 0
+            total_reward_loss = 0
+            total_done_loss = 0
+            total_next_frame_loss = 0
+            total_dynamics_loss = 0
+            total_l1_loss = 0
+            total_ssim_loss = 0
+            total_edge_loss = 0
+            total_q_loss = 0
+            total_imag_reward = 0
+            wm_updates = 0
+            q_updates = 0
 
-                for offline_epoch in range(offline_training_epochs):
-                    # World model updates
-                    for _ in range(current_ratio[0]):
-                        combined_loss, reward_loss, done_loss, recon_loss, dynamics_loss, l1_loss, ssim_loss, edge_loss = self.train_world_model(epochs=1, batch_size=wm_batch_size)
-                        total_combined_loss += combined_loss
-                        total_reward_loss += reward_loss
-                        total_done_loss += done_loss
-                        total_next_frame_loss += recon_loss
-                        total_dynamics_loss += dynamics_loss
-                        total_l1_loss += l1_loss
-                        total_ssim_loss += ssim_loss
-                        total_edge_loss += edge_loss
-                        wm_updates += 1
+            for offline_epoch in range(offline_training_epochs):
+                # World model updates
+                for _ in range(current_ratio[0]):
+                    combined_loss, reward_loss, done_loss, recon_loss, dynamics_loss, l1_loss, ssim_loss, edge_loss = self.train_world_model(epochs=1, batch_size=wm_batch_size)
+                    total_combined_loss += combined_loss
+                    total_reward_loss += reward_loss
+                    total_done_loss += done_loss
+                    total_next_frame_loss += recon_loss
+                    total_dynamics_loss += dynamics_loss
+                    total_l1_loss += l1_loss
+                    total_ssim_loss += ssim_loss
+                    total_edge_loss += edge_loss
+                    wm_updates += 1
 
-                    # Q-model updates (ratio[1]=0 means no Q training)
-                    for _ in range(current_ratio[1]):
-                        q_loss, imag_reward = self.train_q_model_on_imagination(rollout_steps, num_batches=num_batches, epochs=1)
-                        total_q_loss += q_loss
-                        total_imag_reward += imag_reward
-                        q_updates += 1
+                # Q-model updates (ratio[1]=0 means no Q training)
+                for _ in range(current_ratio[1]):
+                    q_loss, imag_reward = self.train_q_model_on_imagination(rollout_steps, num_batches=num_batches, epochs=1)
+                    total_q_loss += q_loss
+                    total_imag_reward += imag_reward
+                    q_updates += 1
 
-                # Average the losses
-                avg_combined_loss = total_combined_loss / wm_updates if wm_updates > 0 else 0
-                avg_reward_loss = total_reward_loss / wm_updates if wm_updates > 0 else 0
-                avg_done_loss = total_done_loss / wm_updates if wm_updates > 0 else 0
-                avg_next_frame_loss = total_next_frame_loss / wm_updates if wm_updates > 0 else 0
-                avg_dynamics_loss = total_dynamics_loss / wm_updates if wm_updates > 0 else 0
-                avg_l1_loss = total_l1_loss / wm_updates if wm_updates > 0 else 0
-                avg_ssim_loss = total_ssim_loss / wm_updates if wm_updates > 0 else 0
-                avg_edge_loss = total_edge_loss / wm_updates if wm_updates > 0 else 0
-                episode_loss = total_q_loss / q_updates if q_updates > 0 else 0
+            # Average the losses
+            avg_combined_loss = total_combined_loss / wm_updates if wm_updates > 0 else 0
+            avg_reward_loss = total_reward_loss / wm_updates if wm_updates > 0 else 0
+            avg_done_loss = total_done_loss / wm_updates if wm_updates > 0 else 0
+            avg_next_frame_loss = total_next_frame_loss / wm_updates if wm_updates > 0 else 0
+            avg_dynamics_loss = total_dynamics_loss / wm_updates if wm_updates > 0 else 0
+            avg_l1_loss = total_l1_loss / wm_updates if wm_updates > 0 else 0
+            avg_ssim_loss = total_ssim_loss / wm_updates if wm_updates > 0 else 0
+            avg_edge_loss = total_edge_loss / wm_updates if wm_updates > 0 else 0
+            episode_loss = total_q_loss / q_updates if q_updates > 0 else 0
 
-                # Log all losses
-                writer.add_scalar("World Model/combined_loss", avg_combined_loss, episode)
-                writer.add_scalar("World Model/reward_loss", avg_reward_loss, episode)
-                writer.add_scalar("World Model/done_loss", avg_done_loss, episode)
-                writer.add_scalar("World Model/reconstruction_loss", avg_next_frame_loss, episode)
-                writer.add_scalar("World Model/dynamics_loss", avg_dynamics_loss, episode)
-                writer.add_scalar("Reconstruction/l1_loss", avg_l1_loss, episode)
-                writer.add_scalar("Reconstruction/ssim_loss", avg_ssim_loss, episode)
-                writer.add_scalar("Reconstruction/edge_loss", avg_edge_loss, episode)
-                writer.add_scalar("Train/wm_updates_per_episode", wm_updates, episode)
-                writer.add_scalar("Train/q_updates_per_episode", q_updates, episode)
-                writer.add_scalar("Train/updates_per_cycle_wm", current_ratio[0], episode)
-                writer.add_scalar("Train/updates_per_cycle_q", current_ratio[1], episode)
+            # Log all losses
+            writer.add_scalar("World Model/combined_loss", avg_combined_loss, episode)
+            writer.add_scalar("World Model/reward_loss", avg_reward_loss, episode)
+            writer.add_scalar("World Model/done_loss", avg_done_loss, episode)
+            writer.add_scalar("World Model/reconstruction_loss", avg_next_frame_loss, episode)
+            writer.add_scalar("World Model/dynamics_loss", avg_dynamics_loss, episode)
+            writer.add_scalar("Reconstruction/l1_loss", avg_l1_loss, episode)
+            writer.add_scalar("Reconstruction/ssim_loss", avg_ssim_loss, episode)
+            writer.add_scalar("Reconstruction/edge_loss", avg_edge_loss, episode)
+            writer.add_scalar("Train/wm_updates_per_episode", wm_updates, episode)
+            writer.add_scalar("Train/q_updates_per_episode", q_updates, episode)
+            writer.add_scalar("Train/updates_per_cycle_wm", current_ratio[0], episode)
+            writer.add_scalar("Train/updates_per_cycle_q", current_ratio[1], episode)
 
-                if q_updates > 0:
-                    avg_imag_reward = total_imag_reward / q_updates
-                    real_reward_per_step = episode_reward / episode_steps if episode_steps > 0 else 0.0
-                    writer.add_scalar("Imagination/mean_reward_per_step", avg_imag_reward, episode)
-                    writer.add_scalar("Imagination/real_reward_per_step", real_reward_per_step, episode)
-                    writer.add_scalar("Imagination/vs_real_reward_diff", avg_imag_reward - real_reward_per_step, episode)
+            if q_updates > 0:
+                avg_imag_reward = total_imag_reward / q_updates
+                real_reward_per_step = episode_reward / episode_steps if episode_steps > 0 else 0.0
+                writer.add_scalar("Imagination/mean_reward_per_step", avg_imag_reward, episode)
+                writer.add_scalar("Imagination/real_reward_per_step", real_reward_per_step, episode)
+                writer.add_scalar("Imagination/vs_real_reward_diff", avg_imag_reward - real_reward_per_step, episode)
 
-                if episode % 100 == 0:
-                    print(f"Completed episode {episode} - Reward loss: {avg_reward_loss}")
+            if episode % 100 == 0:
+                print(f"Completed episode {episode} - Reward loss: {avg_reward_loss}")
 
             writer.add_scalar("Train/episode_reward", episode_reward, episode)
             writer.add_scalar("Train/epsilon", self.epsilon, episode)
+            writer.add_scalar("Train/avg_q_loss", episode_loss, episode)
 
-            if episode_steps > 0:
-                # If we're doing live training, we need to divide by episode steps
-                episode_loss = episode_loss if use_world_model else episode_loss / episode_steps
-                writer.add_scalar("Train/avg_q_loss", episode_loss, episode)
-
-            # Evaluate rollout quality once per episode
-            # Disabled for now while focusing on reconstruction
-            # if use_world_model:
-            #     self.evaluate_rollout(num_steps=8, filename="eval_rollout.png")
-
-            # Evaluate reconstruction quality periodically
-            if use_world_model and episode % 10 == 0:
+            if episode % 10 == 0:
                 self.evaluate_reconstruction(num_samples=4, filename="reconstruction_test.png")
 
             if episode % 10 == 0:
