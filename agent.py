@@ -243,11 +243,14 @@ class Agent:
         """Train Q-model on imagined trajectories (in latent space)."""
 
         total_loss = 0
+        total_imag_reward = 0
 
         for epoch in range(epochs):
 
             # Imagine trajectory in latent space (returns embeddings, not pixels)
             embeddings, actions, rewards, next_embeddings, dones = self.imagine_trajectory(batch_size, num_batches)
+
+            total_imag_reward += rewards.mean().item()
 
             actions = actions.unsqueeze(1).long()
             rewards = rewards.unsqueeze(1)
@@ -279,7 +282,7 @@ class Agent:
 
             self.total_steps += 1
 
-        return total_loss / epochs
+        return total_loss / epochs, total_imag_reward / epochs
 
 
 
@@ -470,6 +473,7 @@ class Agent:
                 total_ssim_loss = 0
                 total_edge_loss = 0
                 total_q_loss = 0
+                total_imag_reward = 0
                 wm_updates = 0
                 q_updates = 0
 
@@ -489,8 +493,9 @@ class Agent:
 
                     # Q-model updates (ratio[1]=0 means no Q training)
                     for _ in range(current_ratio[1]):
-                        q_loss = self.train_q_model_on_imagination(rollout_steps, num_batches=num_batches, epochs=1)
+                        q_loss, imag_reward = self.train_q_model_on_imagination(rollout_steps, num_batches=num_batches, epochs=1)
                         total_q_loss += q_loss
+                        total_imag_reward += imag_reward
                         q_updates += 1
 
                 # Average the losses
@@ -517,6 +522,11 @@ class Agent:
                 writer.add_scalar("Train/q_updates_per_episode", q_updates, episode)
                 writer.add_scalar("Train/updates_per_cycle_wm", current_ratio[0], episode)
                 writer.add_scalar("Train/updates_per_cycle_q", current_ratio[1], episode)
+
+                if q_updates > 0:
+                    avg_imag_reward = total_imag_reward / q_updates
+                    writer.add_scalar("Imagination/mean_reward_per_step", avg_imag_reward, episode)
+                    writer.add_scalar("Imagination/vs_real_reward_diff", avg_imag_reward - episode_reward, episode)
 
                 if episode % 100 == 0:
                     print(f"Completed episode {episode} - Reward loss: {avg_reward_loss}")
