@@ -207,7 +207,7 @@ class WorldModel(BaseModel):
         combined_loss = (
             1.0 * recon_loss +
             1.0 * dynamics_loss +
-            1.0 * reward_loss +
+            2.0 * reward_loss +
             0.5 * done_loss
         )
 
