@@ -72,7 +72,7 @@ class Agent:
         self.epsilon_decay = 0.98
 
         self.imagine_epsilon = 1
-        self.imagine_min_epsilon = 0.15
+        self.imagine_min_epsilon = 0.2
 
         self.total_steps = 0
     
