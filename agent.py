@@ -70,6 +70,10 @@ class Agent:
         self.epsilon = 1
         self.min_epsilon = 0.1
         self.epsilon_decay = 0.98
+
+        self.imagine_epsilon = 1
+        self.imagine_min_epsilon = 0.15
+
         self.total_steps = 0
     
     def normalize_observation(self, obs):
@@ -121,7 +125,7 @@ class Agent:
 
                 # Select action using Q model with epsilon-greedy
                 with torch.no_grad():
-                    if random.random() < self.epsilon:
+                    if random.random() < self.imagine_epsilon:
                         action_idx = torch.tensor([random.randint(0, self.env.action_space.n - 1)], device=embed.device)
                     else:
                         action_idx = self.q_model(embed).argmax(dim=1)
@@ -392,8 +396,9 @@ class Agent:
 
                 obs = next_obs
 
-            # Adjust epsilon. 
+            # Adjust epsilon.
             self.epsilon = max(self.min_epsilon, self.epsilon * self.epsilon_decay)
+            self.imagine_epsilon = max(self.imagine_min_epsilon, self.imagine_epsilon * self.epsilon_decay)
 
             # Log stats for the current training iteration 
             print(f"Episode {episode} | reward: {episode_reward:.1f} | epsilon: {self.epsilon:.3f} | steps: {episode_steps}")
@@ -472,6 +477,7 @@ class Agent:
 
             writer.add_scalar("Train/episode_reward", episode_reward, episode)
             writer.add_scalar("Train/epsilon", self.epsilon, episode)
+            writer.add_scalar("Train/imagine_epsilon", self.imagine_epsilon, episode)
             writer.add_scalar("Train/avg_q_loss", episode_loss, episode)
 
             if episode % 10 == 0:
