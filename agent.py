@@ -69,10 +69,11 @@ class Agent:
 
         self.epsilon = 1
         self.min_epsilon = 0.1
-        self.epsilon_decay = 0.995
+        self.epsilon_decay = 0.98
 
         self.imagine_epsilon = 1
         self.imagine_min_epsilon = 0.1
+        self.imagine_epsilon_decay = 0.995
 
         self.total_steps = 0
     
@@ -398,7 +399,7 @@ class Agent:
 
             # Adjust epsilon.
             self.epsilon = max(self.min_epsilon, self.epsilon * self.epsilon_decay)
-            self.imagine_epsilon = max(self.imagine_min_epsilon, self.imagine_epsilon * self.epsilon_decay)
+            self.imagine_epsilon = max(self.imagine_min_epsilon, self.imagine_epsilon * self.imagine_epsilon_decay)
 
             # Log stats for the current training iteration 
             print(f"Episode {episode} | reward: {episode_reward:.1f} | epsilon: {self.epsilon:.3f} | steps: {episode_steps}")
