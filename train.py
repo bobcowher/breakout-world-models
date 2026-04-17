@@ -8,6 +8,6 @@ gym.register_envs(ale_py)
 env = gym.make("ALE/Breakout-v5", render_mode="rgb_array")
 env = LifePenaltyWrapper(env, penalty=-1.0)
 
-agent = Agent(env=env, max_buffer_size=5000) 
+agent = Agent(env=env, max_buffer_size=100000) 
 
 agent.train(episodes=1200, offline_training_epochs=200, batch_size=8, wm_batch_size=32, num_batches=8)
