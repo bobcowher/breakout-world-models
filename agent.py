@@ -230,7 +230,7 @@ class Agent:
                 next_q = self.target_q_model(next_embeddings).gather(1, next_actions)
                 targets = rewards + (1 - dones) * self.gamma * next_q
 
-            loss = F.mse_loss(q_sa, targets)
+            loss = F.smooth_l1_loss(q_sa, targets)
 
             self.q_model_optimizer.zero_grad()
             loss.backward()
