@@ -61,7 +61,7 @@ class Agent:
         self.q_model = QModel(action_dim=self.env.action_space.n, hidden_dim=256, embed_dim=self.world_model.embed_dim).to(self.device)
         self.target_q_model = QModel(action_dim=self.env.action_space.n, hidden_dim=256, embed_dim=self.world_model.embed_dim).to(self.device)
 
-        self.q_model_optimizer = torch.optim.Adam(self.q_model.parameters(), lr=0.0001)
+        self.q_model_optimizer = torch.optim.Adam(self.q_model.parameters(), lr=0.0003)
 
         self.target_update_interval = target_update_interval
 
