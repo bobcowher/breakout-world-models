@@ -95,60 +95,66 @@ class Agent:
         return obs 
 
 
-    def imagine_trajectory(self, batch_size, num_batches):
+    def imagine_trajectory(self, batch_size, horizon):
         """
-        Imagine trajectory purely in latent space (no decoding).
+        Imagine parallel trajectories in latent space (no decoding).
+        
+        Args:
+            batch_size: Number of parallel trajectories to sample.
+            horizon: Number of steps to roll out for each trajectory.
 
-        Returns embeddings instead of pixel observations.
+        Returns flattened tensors of (batch_size * horizon, ...)
         """
-        obs, _, _, _, _ = self.memory.sample_buffer(1)
+        # Sample a batch of starting observations
+        obs, _, _, _, _ = self.memory.sample_buffer(batch_size)
+        obs = self.normalize_observation(obs)
 
-        total_batch_size = batch_size * num_batches
+        # Encode initial observations to latent space
+        with torch.no_grad():
+            embeds = self.world_model.encode(obs).squeeze(1)  # (batch_size, embed_dim)
 
-        # Store embeddings instead of pixel observations
         embed_dim = self.world_model.embed_dim
-        states      = torch.zeros(total_batch_size, embed_dim)
-        actions     = torch.zeros(total_batch_size)
-        rewards     = torch.zeros(total_batch_size)
-        next_states = torch.zeros(total_batch_size, embed_dim)
-        dones       = torch.zeros(total_batch_size)
+        
+        # Lists to store rollout steps
+        all_states      = []
+        all_actions     = []
+        all_rewards     = []
+        all_next_states = []
+        all_dones       = []
 
-        for batch_idx in range(num_batches):
-            obs, _, _, _, _ = self.memory.sample_buffer(1)
-            obs = self.normalize_observation(obs)
+        current_embeds = embeds
 
-            # Encode initial observation to latent space
+        for _ in range(horizon):
+            # Select actions for the entire batch (epsilon-greedy)
             with torch.no_grad():
-                embed = self.world_model.encode(obs).squeeze(1)  # (1, embed_dim)
+                # Get Q-values for current batch
+                q_vals = self.q_model(current_embeds) # (batch_size, n_actions)
+                best_actions = q_vals.argmax(dim=1)   # (batch_size,)
+                
+                # Apply epsilon-greedy across the batch
+                random_actions = torch.randint(0, self.env.action_space.n, (batch_size,), device=self.device)
+                exploring_mask = (torch.rand(batch_size, device=self.device) < self.imagine_epsilon).long()
+                action_idx = exploring_mask * random_actions + (1 - exploring_mask) * best_actions
+                
+                action_onehot = F.one_hot(action_idx, num_classes=self.env.action_space.n).float()
 
-            for step_idx in range(batch_size):
-                idx = batch_idx * batch_size + step_idx
+                # Imagine next step in parallel
+                next_embeds, rewards, dones = self.world_model.imagine_step(current_embeds, action_onehot)
 
-                # Select action using Q model with epsilon-greedy
-                with torch.no_grad():
-                    if random.random() < self.imagine_epsilon:
-                        action_idx = torch.tensor([random.randint(0, self.env.action_space.n - 1)], device=embed.device)
-                    else:
-                        action_idx = self.q_model(embed).argmax(dim=1)
+                all_states.append(current_embeds)
+                all_actions.append(action_idx)
+                all_rewards.append(rewards.squeeze(-1))
+                all_next_states.append(next_embeds)
+                all_dones.append((dones.squeeze(-1) > 0.5).float())
 
-                    action_onehot = F.one_hot(action_idx, num_classes=self.env.action_space.n).float()
+                current_embeds = next_embeds
 
-                    # Imagine step in latent space (no decoding!)
-                    next_embed, reward, done = self.world_model.imagine_step(embed, action_onehot)
-
-                    states[idx]      = embed.squeeze(0)
-                    actions[idx]     = action_idx.item()
-                    rewards[idx]     = reward.item()
-                    next_states[idx] = next_embed.squeeze(0)
-                    dones[idx]       = (done > 0.5).float().item()
-
-                    embed = next_embed
-
-        states      = states.to(self.device)
-        actions     = actions.to(self.device)
-        rewards     = rewards.to(self.device)
-        next_states = next_states.to(self.device)
-        dones       = dones.to(self.device)
+        # Concatenate and flatten for the Q-learner
+        states      = torch.cat(all_states, dim=0)      # (batch_size * horizon, embed_dim)
+        actions     = torch.cat(all_actions, dim=0)     # (batch_size * horizon)
+        rewards     = torch.cat(all_rewards, dim=0)     # (batch_size * horizon)
+        next_states = torch.cat(all_next_states, dim=0) # (batch_size * horizon, embed_dim)
+        dones       = torch.cat(all_dones, dim=0)       # (batch_size * horizon)
 
         return states, actions, rewards, next_states, dones
 
@@ -201,7 +207,7 @@ class Agent:
     
 
 
-    def train_q_model_on_imagination(self, batch_size, num_batches, epochs=100):
+    def train_q_model_on_imagination(self, horizon, batch_size, epochs=1):
         """Train Q-model on imagined trajectories (in latent space)."""
 
         total_loss = 0
@@ -209,8 +215,8 @@ class Agent:
 
         for epoch in range(epochs):
 
-            # Imagine trajectory in latent space (returns embeddings, not pixels)
-            embeddings, actions, rewards, next_embeddings, dones = self.imagine_trajectory(batch_size, num_batches)
+            # Imagine parallel trajectories in latent space
+            embeddings, actions, rewards, next_embeddings, dones = self.imagine_trajectory(batch_size, horizon)
 
             total_imag_reward += rewards.mean().item()
 
@@ -436,7 +442,7 @@ class Agent:
 
                 # Q-model updates (ratio[1]=0 means no Q training)
                 for _ in range(current_ratio[1]):
-                    q_loss, imag_reward = self.train_q_model_on_imagination(rollout_steps, num_batches=num_batches, epochs=1)
+                    q_loss, imag_reward = self.train_q_model_on_imagination(rollout_steps, batch_size, epochs=1)
                     total_q_loss += q_loss
                     total_imag_reward += imag_reward
                     q_updates += 1
