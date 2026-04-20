@@ -469,6 +469,7 @@ class Agent:
             writer.add_scalar("Reconstruction/edge_loss", avg_edge_loss, episode)
             writer.add_scalar("Train/wm_updates_per_episode", wm_updates, episode)
             writer.add_scalar("Train/q_updates_per_episode", q_updates, episode)
+            writer.add_scalar("Train/target_update_interval", self.target_update_interval, episode)
             writer.add_scalar("Train/updates_per_cycle_wm", current_ratio[0], episode)
             writer.add_scalar("Train/updates_per_cycle_q", current_ratio[1], episode)
 
