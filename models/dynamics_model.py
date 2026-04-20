@@ -15,7 +15,7 @@ class DynamicsModel(BaseModel):
     Output: embed_{t+1} (B, embed_dim)
     """
 
-    def __init__(self, embed_dim=1024, n_actions=4, hidden_dim=512):
+    def __init__(self, embed_dim=1024, n_actions=4, hidden_dim=2048):
         super().__init__()
 
         self.embed_dim = embed_dim
@@ -24,6 +24,8 @@ class DynamicsModel(BaseModel):
         # MLP to predict next embedding
         self.net = nn.Sequential(
             nn.Linear(embed_dim + n_actions, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),

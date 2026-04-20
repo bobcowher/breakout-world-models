@@ -62,7 +62,7 @@ class WorldModel(BaseModel):
                                conv_channels=self.encoder.get_conv_channels())
 
         # Dynamics model - predicts next embedding from current embedding + action
-        self.dynamics = DynamicsModel(embed_dim=embed_dim, n_actions=n_actions, hidden_dim=512)
+        self.dynamics = DynamicsModel(embed_dim=embed_dim, n_actions=n_actions, hidden_dim=2048)
 
         # Embedding normalization (applied after encoder and dynamics)
         self.embed_norm_type = embed_norm

@@ -9,14 +9,12 @@ class Encoder(BaseModel):
     def __init__(self, observation_shape=(), embed_dim=1024):
         super().__init__()
 
-        # Encoder conv layers - track channel dimensions for decoder
-        # NO spatial compression - all stride-1 layers: 96x96 -> 96x96
-        # Ball preserved at FULL 2-3 pixel resolution (no degradation!)
-        # 16 channels × 96×96 = 147,456 dims → ~250M params total, fits in 12GB GPU
-        self.conv_channels = [3, 8, 16]
+        # Deeper representation
+        self.conv_channels = [3, 32, 64, 128]
 
         self.conv1 = nn.Conv2d(self.conv_channels[0], self.conv_channels[1], kernel_size=3, stride=2, padding=1)  # 96->48
         self.conv2 = nn.Conv2d(self.conv_channels[1], self.conv_channels[2], kernel_size=3, stride=2, padding=1)  # 48->24
+        self.conv3 = nn.Conv2d(self.conv_channels[2], self.conv_channels[3], kernel_size=3, stride=2, padding=1)  # 24->12
 
         self.flatten = torch.nn.Flatten()
 
@@ -43,7 +41,8 @@ class Encoder(BaseModel):
             x = x.float() / 255.0
         x = F.elu(self.conv1(x))
         x = F.elu(self.conv2(x))
-        return x  # (B, 16, 24, 24)
+        x = F.elu(self.conv3(x))
+        return x
 
     def _conv_forward(self, x):
         x = self._conv_features(x)
@@ -60,7 +59,7 @@ class Encoder(BaseModel):
 
 class Decoder(BaseModel):
 
-    def __init__(self, observation_shape, embed_dim, conv_output_shape=(16, 24, 24), conv_channels=[3, 8, 16]):
+    def __init__(self, observation_shape, embed_dim, conv_output_shape=(128, 12, 12), conv_channels=[3, 32, 64, 128]):
         super().__init__()
 
         # Use the encoder's conv output shape
@@ -69,17 +68,17 @@ class Decoder(BaseModel):
 
         self.fc_dec = nn.Linear(embed_dim, conv_flat_size)
 
-        # Build decoder layers dynamically in reverse order from encoder
-        # Use output_padding=1 to recover 96x96 from 24x24
-        self.deconv1 = nn.ConvTranspose2d(conv_channels[2], conv_channels[1], kernel_size=3, stride=2, padding=1, output_padding=1)  # 24->48
-        self.deconv2 = nn.ConvTranspose2d(conv_channels[1], conv_channels[0], kernel_size=3, stride=2, padding=1, output_padding=1)  # 48->96
+        self.deconv1 = nn.ConvTranspose2d(conv_channels[3], conv_channels[2], kernel_size=3, stride=2, padding=1, output_padding=1)  # 12->24
+        self.deconv2 = nn.ConvTranspose2d(conv_channels[2], conv_channels[1], kernel_size=3, stride=2, padding=1, output_padding=1)  # 24->48
+        self.deconv3 = nn.ConvTranspose2d(conv_channels[1], conv_channels[0], kernel_size=3, stride=2, padding=1, output_padding=1)  # 48->96
 
     
     def _deconv_forward(self, x):
         x = x.view(-1, *self.conv_output_shape)
         x = F.elu(self.deconv1(x))
+        x = F.elu(self.deconv2(x))
         # No activation on final layer - let sigmoid handle it
-        x = self.deconv2(x)
+        x = self.deconv3(x)
 
         return x
 
@@ -88,5 +87,3 @@ class Decoder(BaseModel):
         x = self._deconv_forward(x)
         x = torch.sigmoid(x)
         return x
-
-
