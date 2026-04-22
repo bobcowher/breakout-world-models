@@ -21,16 +21,10 @@ class DynamicsModel(BaseModel):
         self.embed_dim = embed_dim
         self.n_actions = n_actions
 
-        # MLP to predict next embedding
-        self.net = nn.Sequential(
-            nn.Linear(embed_dim + n_actions, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, embed_dim)
-        )
+        self.fc1 = nn.Linear(embed_dim + n_actions, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc_out = nn.Linear(hidden_dim, embed_dim)
 
         print(f"DynamicsModel initialized:")
         print(f"  Input: embed({embed_dim}) + action({n_actions}) = {embed_dim + n_actions}")
@@ -50,8 +44,7 @@ class DynamicsModel(BaseModel):
         """
         # Concatenate embedding and action
         x = torch.cat([embed, action_onehot], dim=-1)
-
-        # Predict next embedding
-        next_embed = self.net(x)
-
-        return next_embed
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        x = F.relu(self.fc3(x))
+        return self.fc_out(x)
