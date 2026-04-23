@@ -82,6 +82,74 @@ class ReplayBuffer:
 
         return states, actions, rewards, next_states, dones
 
+    def can_sample_sequences(self, batch_size: int, seq_len: int) -> bool:
+        """Require enough consecutive transitions to fill at least 10 sequences."""
+        filled = min(self.mem_ctr, self.mem_size)
+        return filled >= seq_len * 10
+
+    def sample_sequences(self, batch_size: int, seq_len: int):
+        """
+        Sample batch_size sequences of consecutive transitions.
+
+        Consecutive transitions are needed to train the RSSM: the GRU must
+        process a real temporal sequence so gradients flow backward through
+        time (BPTT) and the hidden state learns to carry information forward.
+
+        Sampling avoids the write-head boundary so sequences never mix data
+        from opposite ends of the circular buffer (which would be temporally
+        discontinuous).
+
+        Args:
+            batch_size : number of sequences to return
+            seq_len    : number of consecutive timesteps per sequence
+
+        Returns:
+            states      : (batch_size, seq_len, C, H, W)  uint8 → float32
+            actions     : (batch_size, seq_len)            int64
+            rewards     : (batch_size, seq_len)            float32
+            next_states : (batch_size, seq_len, C, H, W)  uint8 → float32
+            dones       : (batch_size, seq_len)            bool
+        """
+        filled = min(self.mem_ctr, self.mem_size)
+
+        if filled < seq_len:
+            raise ValueError(
+                f"Buffer has {filled} transitions but seq_len={seq_len} required."
+            )
+
+        if self.mem_ctr <= self.mem_size:
+            # Buffer has not yet wrapped — all indices 0…filled-1 are valid
+            # and temporally ordered, so any contiguous window is safe.
+            max_start_index = filled - seq_len
+            start_indices   = torch.randint(
+                0, max_start_index + 1, (batch_size,), device=self.input_device
+            )
+        else:
+            # Buffer is full and wrapping.  The write head sits at the oldest
+            # data boundary.  To avoid sampling across that boundary we start
+            # all sequences at or after the write head and stay within
+            # (mem_size - seq_len) steps forward, which guarantees no sequence
+            # crosses the boundary.
+            write_head_index = self.mem_ctr % self.mem_size
+            valid_range      = self.mem_size - seq_len
+            random_offsets   = torch.randint(
+                0, valid_range, (batch_size,), device=self.input_device
+            )
+            start_indices = (write_head_index + random_offsets) % self.mem_size
+
+        # Build all per-step indices: shape (batch_size, seq_len)
+        step_offsets = torch.arange(seq_len, device=self.input_device)
+        all_indices  = (start_indices.unsqueeze(1) + step_offsets.unsqueeze(0)) % self.mem_size
+
+        # Gather and move to output device in one shot
+        states      = self.state_memory[all_indices].to(self.output_device, dtype=torch.float32)
+        next_states = self.next_state_memory[all_indices].to(self.output_device, dtype=torch.float32)
+        actions     = self.action_memory[all_indices].to(self.output_device)
+        rewards     = self.reward_memory[all_indices].to(self.output_device)
+        dones       = self.terminal_memory[all_indices].to(self.output_device)
+
+        return states, actions, rewards, next_states, dones
+
     def print_stats(self):
         filled = min(self.mem_ctr, self.mem_size)
         tensors = [self.state_memory, self.next_state_memory,

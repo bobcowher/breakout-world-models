@@ -10,13 +10,14 @@ import torch.nn.functional as F
 from torch.utils.tensorboard.writer import SummaryWriter
 import datetime
 import random
-from models.perceptual_loss import PerceptualLoss
+
 
 def get_wm_q_ratio(episode):
     """Dynamic world model to Q-model training ratio based on episode.
 
-    Keeps world model training strong throughout to track evolving data distribution.
-    Never drops below 400 WM updates/episode to prevent WM degradation.
+    Keeps world model training strong throughout to track the evolving
+    data distribution. Never drops below a meaningful WM update rate
+    to prevent world model degradation during Q-heavy phases.
     """
     if episode < 25:
         return [4, 0]   # WM-only: build foundation
@@ -25,302 +26,303 @@ def get_wm_q_ratio(episode):
     elif episode < 250:
         return [2, 2]   # Balanced: let WM stabilize
     else:
-        return [2, 3]   # Q-focused but WM stays strong (250-1200)
+        return [2, 3]   # Q-focused but WM stays strong
 
 
 class Agent:
 
-    def __init__(self, env : gym.Env,
-                       max_buffer_size : int = 10000,
-                       world_model_batch_size = 8,
-                       target_update_interval = 10000) -> None:
-        self.env = env
+    def __init__(self, env: gym.Env,
+                       max_buffer_size: int = 10000,
+                       world_model_batch_size: int = 8,
+                       target_update_interval: int = 10000) -> None:
+        self.env    = env
         self.device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
         os.makedirs("checkpoints", exist_ok=True)
         os.makedirs("runs", exist_ok=True)
 
-        obs, info = self.env.reset()
+        initial_obs, _ = self.env.reset()
+        processed_obs  = self.process_observation(initial_obs)
+        n_actions      = int(self.env.action_space.n)  # type: ignore[attr-defined]
 
-        obs = self.process_observation(obs)
+        self.memory = ReplayBuffer(
+            max_size=max_buffer_size,
+            input_shape=processed_obs.shape,
+            n_actions=n_actions,
+            input_device=self.device,
+            output_device=self.device,
+        )
 
-        self.memory = ReplayBuffer(max_size=max_buffer_size, input_shape=obs.shape, n_actions=self.env.action_space.n, input_device=self.device, output_device=self.device)
+        self.world_model = WorldModel(
+            observation_shape=processed_obs.shape,
+            embed_dim=1024,
+            rssm_hidden_dim=1024,
+            n_actions=n_actions,
+            embed_norm='layernorm',
+        ).to(self.device)
 
-        # print(torch.squeeze(obs).shape)
+        print(f"Observation shape: {processed_obs.shape}")
 
-        self.world_model = WorldModel(observation_shape=obs.shape, embed_dim=1024, n_actions=self.env.action_space.n, embed_norm='layernorm').to(self.device)
-
-        print(f"Observation shape: {obs.shape}")
-
-        self.world_model_optimizer = torch.optim.Adam(self.world_model.parameters(), lr=0.0001)
-
+        self.world_model_optimizer = torch.optim.Adam(
+            self.world_model.parameters(), lr=0.0001
+        )
         self.world_model_batch_size = world_model_batch_size
 
-        self.next_frame_loss = PerceptualLoss().to(self.device)
+        # Q-model operates on RSSM hidden states (same dim as rssm_hidden_dim)
+        self.q_model = QModel(
+            action_dim=n_actions,
+            hidden_dim=256,
+            embed_dim=self.world_model.rssm_hidden_dim,
+        ).to(self.device)
 
-        self.q_model = QModel(action_dim=self.env.action_space.n, hidden_dim=256, embed_dim=self.world_model.embed_dim).to(self.device)
-        self.target_q_model = QModel(action_dim=self.env.action_space.n, hidden_dim=256, embed_dim=self.world_model.embed_dim).to(self.device)
+        self.target_q_model = QModel(
+            action_dim=n_actions,
+            hidden_dim=256,
+            embed_dim=self.world_model.rssm_hidden_dim,
+        ).to(self.device)
 
-        self.q_model_optimizer = torch.optim.Adam(self.q_model.parameters(), lr=0.0001)
+        self.q_model_optimizer = torch.optim.Adam(
+            self.q_model.parameters(), lr=0.0001
+        )
 
         self.target_update_interval = target_update_interval
+        self.gamma                  = 0.99
 
-        self.gamma = 0.99
+        # Real-environment exploration
+        self.epsilon         = 1.0
+        self.min_epsilon     = 0.1
+        self.epsilon_decay   = 0.98
 
-        self.epsilon = 1
-        self.min_epsilon = 0.1
-        self.epsilon_decay = 0.98
-
-        self.imagine_epsilon = 1
-        self.imagine_min_epsilon = 0.1
+        # Imagination exploration
+        self.imagine_epsilon       = 1.0
+        self.imagine_min_epsilon   = 0.1
         self.imagine_epsilon_decay = 0.99
 
         self.total_steps = 0
-    
+
+    # ------------------------------------------------------------------
+    # Observation utilities
+    # ------------------------------------------------------------------
+
     def normalize_observation(self, obs):
         return obs / 255.0
 
     def process_observation(self, obs):
-        # obs = torch.tensor(obs, dtype=torch.float32).permute(2,0,1)
-
         obs = cv2.resize(obs, (96, 96), interpolation=cv2.INTER_NEAREST)
-        # obs = cv2.cvtColor(obs, cv2.COLOR_RGB2GRAY) # let's do grayscale    
-        # obs = torch.from_numpy(obs).permute(2, 0, 1).to(self.device)
+        obs = torch.from_numpy(obs).permute(2, 0, 1)
+        return obs
 
-
-        obs = torch.from_numpy(obs)
-
-        obs = obs.permute(2, 0, 1)
-        
-        return obs 
-
+    # ------------------------------------------------------------------
+    # Imagination rollout (pure latent space, RSSM hidden state)
+    # ------------------------------------------------------------------
 
     def imagine_trajectory(self, batch_size, horizon):
         """
-        Imagine parallel trajectories in latent space (no decoding).
-        
-        Args:
-            batch_size: Number of parallel trajectories to sample.
-            horizon: Number of steps to roll out for each trajectory.
+        Imagine batch_size parallel trajectories for horizon steps in latent space.
 
-        Returns flattened tensors of (batch_size * horizon, ...)
+        Starting observations are sampled from the replay buffer and encoded
+        into initial RSSM hidden states. From there, each step uses the
+        prior_predictor (no real observations) to advance the hidden state —
+        the same distribution the RSSM trained on.
+
+        Returns flattened tensors of (batch_size * horizon, ...) for Q-training.
         """
-        # Sample a batch of starting observations
-        obs, _, _, _, _ = self.memory.sample_buffer(batch_size)
-        obs = self.normalize_observation(obs)
+        n_actions = int(self.env.action_space.n)  # type: ignore[attr-defined]
 
-        # Encode initial observations to latent space
+        # Sample starting observations and encode them to initial hidden states
+        sampled_obs, _, _, _, _ = self.memory.sample_buffer(batch_size)
+        sampled_obs_normalized  = self.normalize_observation(sampled_obs)
+
         with torch.no_grad():
-            embeds = self.world_model.encode(obs).squeeze(1)  # (batch_size, embed_dim)
+            current_hidden_states = self.world_model.encode_observation_to_hidden(
+                sampled_obs_normalized
+            )  # (batch_size, rssm_hidden_dim)
 
-        embed_dim = self.world_model.embed_dim
-        
-        # Lists to store rollout steps
-        all_states      = []
-        all_actions     = []
-        all_rewards     = []
-        all_next_states = []
-        all_dones       = []
-
-        current_embeds = embeds
+        # Accumulators for all rollout steps
+        all_hidden_states      = []
+        all_actions            = []
+        all_rewards            = []
+        all_next_hidden_states = []
+        all_dones              = []
 
         for _ in range(horizon):
-            # Select actions for the entire batch (epsilon-greedy)
             with torch.no_grad():
-                # Get Q-values for current batch
-                q_vals = self.q_model(current_embeds) # (batch_size, n_actions)
-                best_actions = q_vals.argmax(dim=1)   # (batch_size,)
-                
-                # Apply epsilon-greedy across the batch
-                random_actions = torch.randint(0, self.env.action_space.n, (batch_size,), device=self.device)
-                exploring_mask = (torch.rand(batch_size, device=self.device) < self.imagine_epsilon).long()
-                action_idx = exploring_mask * random_actions + (1 - exploring_mask) * best_actions
-                
-                action_onehot = F.one_hot(action_idx, num_classes=self.env.action_space.n).float()
+                # Select actions using Q-model on current hidden states (epsilon-greedy)
+                q_values     = self.q_model(current_hidden_states)
+                best_actions = q_values.argmax(dim=1)
 
-                # Imagine next step in parallel
-                next_embeds, rewards, dones = self.world_model.imagine_step(current_embeds, action_onehot)
+                random_actions  = torch.randint(0, n_actions, (batch_size,), device=self.device)
+                is_exploring    = (torch.rand(batch_size, device=self.device) < self.imagine_epsilon)
+                selected_actions = torch.where(is_exploring, random_actions, best_actions)
 
-                all_states.append(current_embeds)
-                all_actions.append(action_idx)
+                action_onehot = F.one_hot(selected_actions, num_classes=n_actions).float()
+
+                # Advance the world model using the prior (no real observation)
+                next_hidden_states, rewards, dones = self.world_model.imagine_step(
+                    current_hidden_states, action_onehot
+                )
+
+                all_hidden_states.append(current_hidden_states)
+                all_actions.append(selected_actions)
                 all_rewards.append(rewards.squeeze(-1))
-                all_next_states.append(next_embeds)
+                all_next_hidden_states.append(next_hidden_states)
                 all_dones.append((dones.squeeze(-1) > 0.5).float())
 
-                current_embeds = next_embeds
+                current_hidden_states = next_hidden_states
 
-        # Concatenate and flatten for the Q-learner
-        states      = torch.cat(all_states, dim=0)      # (batch_size * horizon, embed_dim)
-        actions     = torch.cat(all_actions, dim=0)     # (batch_size * horizon)
-        rewards     = torch.cat(all_rewards, dim=0)     # (batch_size * horizon)
-        next_states = torch.cat(all_next_states, dim=0) # (batch_size * horizon, embed_dim)
-        dones       = torch.cat(all_dones, dim=0)       # (batch_size * horizon)
+        # Flatten along batch × horizon
+        hidden_states      = torch.cat(all_hidden_states,      dim=0)   # (B*H, rssm_hidden_dim)
+        actions            = torch.cat(all_actions,            dim=0)   # (B*H,)
+        rewards            = torch.cat(all_rewards,            dim=0)   # (B*H,)
+        next_hidden_states = torch.cat(all_next_hidden_states, dim=0)   # (B*H, rssm_hidden_dim)
+        dones              = torch.cat(all_dones,              dim=0)   # (B*H,)
 
-        return states, actions, rewards, next_states, dones
+        return hidden_states, actions, rewards, next_hidden_states, dones
 
-    def train_world_model(self, epochs, batch_size):
-        """Train world model with reconstruction + dynamics + prediction losses."""
+    # ------------------------------------------------------------------
+    # World model training (sequence-based for RSSM BPTT)
+    # ------------------------------------------------------------------
 
-        total_loss = 0.0
-        total_recon = 0.0
-        total_dynamics = 0.0
-        total_dynamics_reward = 0.0
-        total_reward = 0.0
-        total_done = 0.0
-        total_l1 = 0.0
-        total_ssim = 0.0
-        total_edge = 0.0
+    def train_world_model(self, epochs, batch_size, seq_len):
+        """
+        Train the world model on sequences of real transitions.
+
+        Sequences are required (rather than individual samples) so that BPTT
+        can propagate gradients through the GRU hidden state across multiple
+        timesteps. This trains the RSSM to carry information coherently
+        through time — the property that makes imagination reliable.
+        """
+        if not self.memory.can_sample_sequences(batch_size, seq_len):
+            # Not enough consecutive transitions yet — skip silently
+            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+
+        total_loss         = 0.0
+        total_recon_loss   = 0.0
+        total_prior_loss   = 0.0
+        total_reward_loss  = 0.0
+        total_done_loss    = 0.0
+        total_l1_loss      = 0.0
+        total_ssim_loss    = 0.0
+        total_edge_loss    = 0.0
 
         for _ in range(epochs):
-            obs, actions, rewards, next_obs, dones = self.memory.sample_buffer(batch_size)
+            obs_seq, action_seq, reward_seq, _, done_seq = self.memory.sample_sequences(
+                batch_size=batch_size,
+                seq_len=seq_len,
+            )
 
-            # Compute all losses
-            loss, loss_dict = self.world_model.compute_loss(obs, actions, rewards, next_obs, dones)
+            # obs_seq is float32 from the buffer; convert to uint8 range expected by compute_loss
+            obs_seq_uint8 = obs_seq.to(torch.uint8)
 
-            # Optimize
+            loss, loss_dict = self.world_model.compute_loss(
+                obs_seq    = obs_seq_uint8,
+                action_seq = action_seq,
+                reward_seq = reward_seq,
+                done_seq   = done_seq,
+            )
+
             self.world_model_optimizer.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.world_model.parameters(), max_norm=1.0)
             self.world_model_optimizer.step()
 
-            # Track losses
-            total_loss += loss_dict["total"]
-            total_recon += loss_dict["recon"]
-            total_dynamics += loss_dict["dynamics"]
-            total_dynamics_reward += loss_dict["dynamics_reward"]
-            total_reward += loss_dict["reward"]
-            total_done += loss_dict["done"]
-            total_l1 += loss_dict["l1"]
-            total_ssim += loss_dict["ssim"]
-            total_edge += loss_dict["edge"]
+            total_loss        += loss_dict["total"]
+            total_recon_loss  += loss_dict["recon"]
+            total_prior_loss  += loss_dict["prior"]
+            total_reward_loss += loss_dict["reward"]
+            total_done_loss   += loss_dict["done"]
+            total_l1_loss     += loss_dict["l1"]
+            total_ssim_loss   += loss_dict["ssim"]
+            total_edge_loss   += loss_dict["edge"]
 
-        # Average losses
-        avg_total = total_loss / epochs
-        avg_recon = total_recon / epochs
-        avg_dynamics = total_dynamics / epochs
-        avg_dynamics_reward = total_dynamics_reward / epochs
-        avg_reward = total_reward / epochs
-        avg_done = total_done / epochs
-        avg_l1 = total_l1 / epochs
-        avg_ssim = total_ssim / epochs
-        avg_edge = total_edge / epochs
+        avg_total        = total_loss        / epochs
+        avg_recon_loss   = total_recon_loss  / epochs
+        avg_prior_loss   = total_prior_loss  / epochs
+        avg_reward_loss  = total_reward_loss / epochs
+        avg_done_loss    = total_done_loss   / epochs
+        avg_l1_loss      = total_l1_loss     / epochs
+        avg_ssim_loss    = total_ssim_loss   / epochs
+        avg_edge_loss    = total_edge_loss   / epochs
 
-        # Return format: combined, reward, done, recon, dynamics, dynamics_reward, l1, ssim, edge
-        return avg_total, avg_reward, avg_done, avg_recon, avg_dynamics, avg_dynamics_reward, avg_l1, avg_ssim, avg_edge
+        return (avg_total, avg_reward_loss, avg_done_loss, avg_recon_loss,
+                avg_prior_loss, avg_l1_loss, avg_ssim_loss, avg_edge_loss)
 
-    
-
+    # ------------------------------------------------------------------
+    # Q-model training on imagined trajectories
+    # ------------------------------------------------------------------
 
     def train_q_model_on_imagination(self, horizon, batch_size, epochs=1):
-        """Train Q-model on imagined trajectories (in latent space)."""
+        """
+        Train the Q-model on imagined trajectories in RSSM hidden-state space.
 
-        total_loss = 0
-        total_imag_reward = 0
+        Uses Double DQN targets:
+          - Online network selects the best next action
+          - Target network evaluates that action's Q-value
+        This reduces the overestimation bias of standard DQN.
+        """
+        total_q_loss      = 0.0
+        total_imag_reward = 0.0
 
-        for epoch in range(epochs):
-
-            # Imagine parallel trajectories in latent space
-            embeddings, actions, rewards, next_embeddings, dones = self.imagine_trajectory(batch_size, horizon)
-
-            total_imag_reward += rewards.mean().item()
+        for _ in range(epochs):
+            hidden_states, actions, rewards, next_hidden_states, dones = \
+                self.imagine_trajectory(batch_size, horizon)
 
             actions = actions.unsqueeze(1).long()
             rewards = rewards.unsqueeze(1)
-            dones = dones.unsqueeze(1).float()
+            dones   = dones.unsqueeze(1).float()
 
-            # Q-learning in latent space
-            q_values = self.q_model(embeddings)
-            q_sa     = q_values.gather(1, actions)
+            # Current Q-values for the actions taken
+            q_values     = self.q_model(hidden_states)
+            q_sa         = q_values.gather(1, actions)
 
             with torch.no_grad():
-                next_actions = torch.argmax(
-                    self.q_model(next_embeddings), dim=1, keepdim=True
-                )
+                # Double DQN: online network picks action, target network evaluates it
+                best_next_actions = self.q_model(next_hidden_states).argmax(dim=1, keepdim=True)
+                next_q_values     = self.target_q_model(next_hidden_states).gather(1, best_next_actions)
+                td_targets        = rewards + (1 - dones) * self.gamma * next_q_values
 
-                next_q = self.target_q_model(next_embeddings).gather(1, next_actions)
-                targets = rewards + (1 - dones) * self.gamma * next_q
-
-            loss = F.mse_loss(q_sa, targets)
+            q_loss = F.mse_loss(q_sa, td_targets)
 
             self.q_model_optimizer.zero_grad()
-            loss.backward()
+            q_loss.backward()
             torch.nn.utils.clip_grad_norm_(self.q_model.parameters(), max_norm=1.0)
             self.q_model_optimizer.step()
 
             if self.total_steps % self.target_update_interval == 0:
                 self.target_q_model.load_state_dict(self.q_model.state_dict())
 
-            total_loss += loss.item()
+            total_q_loss      += q_loss.item()
+            total_imag_reward += rewards.mean().item()
+            self.total_steps  += 1
 
-            self.total_steps += 1
+        return total_q_loss / epochs, total_imag_reward / epochs
 
-        return total_loss / epochs, total_imag_reward / epochs
-
-
+    # ------------------------------------------------------------------
+    # Evaluation helpers
+    # ------------------------------------------------------------------
 
     def evaluate_reconstruction(self, num_samples=4, filename="reconstruction_test.png"):
-        """Evaluate reconstruction quality by comparing original vs reconstructed observations.
-
-        Args:
-            num_samples: Number of observations to reconstruct
-            filename: Output image path
-        """
+        """Compare original vs reconstructed observations and save to disk."""
         if not self.memory.can_sample(num_samples):
             return
 
-        # Sample observations from replay buffer
         obs, _, _, _, _ = self.memory.sample_buffer(num_samples)
-        obs_normalized = obs.float() / 255.0
+        obs_normalized  = obs.float() / 255.0
 
         with torch.no_grad():
-            # Get reconstructions from world model
-            dummy_action = torch.zeros(num_samples, self.env.action_space.n, device=self.device)
-            recon, _, _, _, _ = self.world_model.forward(obs_normalized, dummy_action)
+            reconstructed_obs, _ = self.world_model.forward(obs_normalized)
 
-        # Prepare visualization pairs
         viz_pairs = []
         for i in range(num_samples):
-            viz_pairs.append((f"original_{i}", obs_normalized[i].cpu()))
-            viz_pairs.append((f"recon_{i}", recon[i].cpu()))
+            viz_pairs.append((f"original_{i}",     obs_normalized[i].cpu()))
+            viz_pairs.append((f"reconstructed_{i}", reconstructed_obs[i].cpu()))
 
-        # Save comparison image
         display_stacked_obs(viz_pairs, filename, num_frames=1)
         print(f"Saved reconstruction comparison to {filename}")
 
-    def evaluate_rollout(self, num_steps=8, filename="eval_rollout.png"):
-        """Evaluate world model rollout quality over multiple steps.
-
-        Args:
-            num_steps: Number of rollout steps to visualize
-            filename: Output image path
-        """
-        if not self.memory.can_sample(1):
-            return
-
-        # Sample a starting observation
-        obs, _, _, _, _ = self.memory.sample_buffer(1)
-        obs = self.normalize_observation(obs)  # [1, 3, 128, 128]
-
-        rollout_frames = [("step_0_real", obs.cpu())]
-        current_obs = obs
-
-        with torch.no_grad():
-            for step in range(1, num_steps + 1):
-                # Use Q model to select action in latent space
-                embed = self.world_model.encode(current_obs).squeeze(1)  # (1, embed_dim)
-                action_idx = self.q_model(embed).argmax(dim=1)
-                action_onehot = F.one_hot(action_idx, num_classes=self.env.action_space.n).float()
-
-                # Predict next observation using the selected action
-                pred_next_obs, _, _, _, _ = self.world_model.forward(current_obs, action_onehot)
-
-                # Store the predicted observation
-                rollout_frames.append((f"step_{step}_pred", pred_next_obs.cpu()))
-
-                # Use predicted observation as input for next step
-                current_obs = pred_next_obs
-
-        # Visualize all rollout steps (show only last frame of each 4-frame stack)
-        display_stacked_obs(rollout_frames, filename, num_frames=1)
+    # ------------------------------------------------------------------
+    # Checkpoint save / load
+    # ------------------------------------------------------------------
 
     def save(self):
         self.world_model.save_the_model("world_model", verbose=True)
@@ -331,172 +333,184 @@ class Agent:
         self.q_model.load_the_model("q_model", device=self.device)
         self.target_q_model.load_the_model("q_model", device=self.device)
 
+    # ------------------------------------------------------------------
+    # Test (greedy policy in real environment)
+    # ------------------------------------------------------------------
+
     def test(self, episodes=10):
         self.q_model.eval()
         total_rewards = []
 
-        for episode in range(episodes):
-            obs, _ = self.env.reset()
-            obs = self.process_observation(obs)
-            done = False
+        for episode_idx in range(episodes):
+            obs, _         = self.env.reset()
+            obs            = self.process_observation(obs)
+            done           = False
             episode_reward = 0.0
 
             while not done:
-                # Encode observation to latent space before Q-model
                 with torch.no_grad():
-                    obs_t = obs.unsqueeze(0).float().to(self.device) / 255.0
-                    embed = self.world_model.encode(obs_t).squeeze(1)  # (1, embed_dim)
-                    action = self.q_model(embed).argmax(dim=1).item()
+                    obs_normalized = obs.unsqueeze(0).float().to(self.device) / 255.0
+                    hidden_state   = self.world_model.encode_observation_to_hidden(obs_normalized)
+                    action         = self.q_model(hidden_state).argmax(dim=1).item()
 
                 next_obs, reward, term, trunc, _ = self.env.step(action)
-                next_obs = self.process_observation(next_obs)
-                done = term or trunc
-                episode_reward += reward
-                obs = next_obs
+                next_obs        = self.process_observation(next_obs)
+                done            = term or trunc
+                episode_reward += float(reward)
+                obs             = next_obs
 
             total_rewards.append(episode_reward)
-            print(f"Test episode {episode} | reward: {episode_reward:.1f}")
+            print(f"Test episode {episode_idx} | reward: {episode_reward:.1f}")
 
-        avg = sum(total_rewards) / len(total_rewards)
-        print(f"Average reward over {episodes} episodes: {avg:.1f}")
+        avg_reward = sum(total_rewards) / len(total_rewards)
+        print(f"Average reward over {episodes} episodes: {avg_reward:.1f}")
         self.q_model.train()
         return total_rewards
 
-    def train(self, episodes=1, offline_training_epochs=1, batch_size=1, num_batches=1, wm_batch_size=1, imagination_steps=None):
+    # ------------------------------------------------------------------
+    # Main training loop
+    # ------------------------------------------------------------------
+
+    def train(self, episodes=1, offline_training_epochs=1, batch_size=1,
+              num_batches=1, wm_batch_size=1, wm_seq_len=16, imagination_steps=None):
 
         rollout_steps = imagination_steps if imagination_steps is not None else batch_size
 
-        run_tag = f'world_model_ote{offline_training_epochs}_bs{batch_size}_wmbs{wm_batch_size}_rollout{rollout_steps}_buf{self.memory.mem_size}'
-        summary_writer_name = f'runs/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}_{run_tag}'
-
-        writer = SummaryWriter(summary_writer_name)
+        run_tag = (
+            f'world_model_rssm'
+            f'_ote{offline_training_epochs}'
+            f'_bs{batch_size}'
+            f'_wmbs{wm_batch_size}'
+            f'_seqlen{wm_seq_len}'
+            f'_rollout{rollout_steps}'
+            f'_buf{self.memory.mem_size}'
+        )
+        log_dir = f'runs/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}_{run_tag}'
+        writer  = SummaryWriter(log_dir)
 
         for episode in range(episodes):
-            
-            obs, info = self.env.reset()
 
-            obs = self.process_observation(obs)
+            obs, _ = self.env.reset()
+            obs    = self.process_observation(obs)
 
-            done = False
+            done           = False
             episode_reward = 0.0
-            episode_loss = 0.0
-            episode_steps = 0
+            episode_steps  = 0
 
+            # --- Collect one episode of real experience ---
             while not done:
-
                 if random.random() < self.epsilon:
                     action = self.env.action_space.sample()
                 else:
-                    # Encode observation to latent space before Q-model
                     with torch.no_grad():
-                        obs_t = obs.unsqueeze(0).float().to(self.device) / 255.0
-                        embed = self.world_model.encode(obs_t).squeeze(1)  # (1, embed_dim)
-                        action = self.q_model(embed).argmax(dim=1).item()
+                        obs_normalized = obs.unsqueeze(0).float().to(self.device) / 255.0
+                        hidden_state   = self.world_model.encode_observation_to_hidden(obs_normalized)
+                        action         = self.q_model(hidden_state).argmax(dim=1).item()
 
-                next_obs, reward, term, trunc, info = self.env.step(action)
-
+                next_obs, reward, term, trunc, _ = self.env.step(action)
                 next_obs = self.process_observation(next_obs)
-
-                done = (term or trunc)
+                done     = term or trunc
 
                 self.memory.store_transition(obs, action, reward, next_obs, done)
 
-                episode_reward += reward
-                episode_steps += 1
+                episode_reward += float(reward)
+                episode_steps  += 1
+                obs             = next_obs
 
-                obs = next_obs
-
-            # Adjust epsilon.
-            self.epsilon = max(self.min_epsilon, self.epsilon * self.epsilon_decay)
+            # Decay exploration rates
+            self.epsilon        = max(self.min_epsilon,        self.epsilon        * self.epsilon_decay)
             self.imagine_epsilon = max(self.imagine_min_epsilon, self.imagine_epsilon * self.imagine_epsilon_decay)
 
-            # Log stats for the current training iteration 
-            print(f"Episode {episode} | reward: {episode_reward:.1f} | epsilon: {self.epsilon:.3f} | steps: {episode_steps}")
+            print(f"Episode {episode} | reward: {episode_reward:.1f} | "
+                  f"epsilon: {self.epsilon:.3f} | steps: {episode_steps}")
 
-            # Interleaved training with dynamic wm_q_ratio
+            # --- Interleaved training with dynamic WM/Q ratio ---
             current_ratio = get_wm_q_ratio(episode)
 
-            total_combined_loss = 0
-            total_reward_loss = 0
-            total_done_loss = 0
-            total_next_frame_loss = 0
-            total_dynamics_loss = 0
-            total_l1_loss = 0
-            total_ssim_loss = 0
-            total_edge_loss = 0
-            total_q_loss = 0
-            total_imag_reward = 0
-            wm_updates = 0
-            q_updates = 0
+            total_combined_loss  = 0.0
+            total_reward_loss    = 0.0
+            total_done_loss      = 0.0
+            total_recon_loss     = 0.0
+            total_prior_loss     = 0.0
+            total_l1_loss        = 0.0
+            total_ssim_loss      = 0.0
+            total_edge_loss      = 0.0
+            total_q_loss         = 0.0
+            total_imag_reward    = 0.0
+            wm_updates           = 0
+            q_updates            = 0
 
-            for offline_epoch in range(offline_training_epochs):
-                # World model updates
+            for _ in range(offline_training_epochs):
+                # World model updates (sequence-based RSSM training)
                 for _ in range(current_ratio[0]):
-                    combined_loss, reward_loss, done_loss, recon_loss, dynamics_loss, dynamics_reward_loss, l1_loss, ssim_loss, edge_loss = self.train_world_model(epochs=1, batch_size=wm_batch_size)
+                    (combined_loss, reward_loss, done_loss, recon_loss,
+                     prior_loss, l1_loss, ssim_loss, edge_loss) = self.train_world_model(
+                        epochs=1, batch_size=wm_batch_size, seq_len=wm_seq_len
+                    )
                     total_combined_loss += combined_loss
-                    total_reward_loss += reward_loss
-                    total_done_loss += done_loss
-                    total_next_frame_loss += recon_loss
-                    total_dynamics_loss += dynamics_loss
-                    total_l1_loss += l1_loss
-                    total_ssim_loss += ssim_loss
-                    total_edge_loss += edge_loss
-                    wm_updates += 1
+                    total_reward_loss   += reward_loss
+                    total_done_loss     += done_loss
+                    total_recon_loss    += recon_loss
+                    total_prior_loss    += prior_loss
+                    total_l1_loss       += l1_loss
+                    total_ssim_loss     += ssim_loss
+                    total_edge_loss     += edge_loss
+                    wm_updates          += 1
 
-                # Q-model updates (ratio[1]=0 means no Q training)
+                # Q-model updates on imagined trajectories
                 for _ in range(current_ratio[1]):
-                    q_loss, imag_reward = self.train_q_model_on_imagination(rollout_steps, batch_size, epochs=1)
-                    total_q_loss += q_loss
+                    q_loss, imag_reward = self.train_q_model_on_imagination(
+                        rollout_steps, batch_size, epochs=1
+                    )
+                    total_q_loss      += q_loss
                     total_imag_reward += imag_reward
-                    q_updates += 1
+                    q_updates         += 1
 
-            # Average the losses
-            avg_combined_loss = total_combined_loss / wm_updates if wm_updates > 0 else 0
-            avg_reward_loss = total_reward_loss / wm_updates if wm_updates > 0 else 0
-            avg_done_loss = total_done_loss / wm_updates if wm_updates > 0 else 0
-            avg_next_frame_loss = total_next_frame_loss / wm_updates if wm_updates > 0 else 0
-            avg_dynamics_loss = total_dynamics_loss / wm_updates if wm_updates > 0 else 0
-            avg_l1_loss = total_l1_loss / wm_updates if wm_updates > 0 else 0
-            avg_ssim_loss = total_ssim_loss / wm_updates if wm_updates > 0 else 0
-            avg_edge_loss = total_edge_loss / wm_updates if wm_updates > 0 else 0
-            episode_loss = total_q_loss / q_updates if q_updates > 0 else 0
+            # --- Average losses ---
+            safe_wm_denom = wm_updates if wm_updates > 0 else 1
+            safe_q_denom  = q_updates  if q_updates  > 0 else 1
 
-            # Log all losses
-            writer.add_scalar("World Model/combined_loss", avg_combined_loss, episode)
-            writer.add_scalar("World Model/reward_loss", avg_reward_loss, episode)
-            writer.add_scalar("World Model/done_loss", avg_done_loss, episode)
-            writer.add_scalar("World Model/reconstruction_loss", avg_next_frame_loss, episode)
-            writer.add_scalar("World Model/dynamics_loss", avg_dynamics_loss, episode)
-            writer.add_scalar("Reconstruction/l1_loss", avg_l1_loss, episode)
-            writer.add_scalar("Reconstruction/ssim_loss", avg_ssim_loss, episode)
-            writer.add_scalar("Reconstruction/edge_loss", avg_edge_loss, episode)
-            writer.add_scalar("Train/wm_updates_per_episode", wm_updates, episode)
-            writer.add_scalar("Train/q_updates_per_episode", q_updates, episode)
-            writer.add_scalar("Train/target_update_interval", self.target_update_interval, episode)
-            writer.add_scalar("Train/updates_per_cycle_wm", current_ratio[0], episode)
-            writer.add_scalar("Train/updates_per_cycle_q", current_ratio[1], episode)
+            avg_combined_loss = total_combined_loss / safe_wm_denom
+            avg_reward_loss   = total_reward_loss   / safe_wm_denom
+            avg_done_loss     = total_done_loss     / safe_wm_denom
+            avg_recon_loss    = total_recon_loss    / safe_wm_denom
+            avg_prior_loss    = total_prior_loss    / safe_wm_denom
+            avg_l1_loss       = total_l1_loss       / safe_wm_denom
+            avg_ssim_loss     = total_ssim_loss     / safe_wm_denom
+            avg_edge_loss     = total_edge_loss     / safe_wm_denom
+            avg_q_loss        = total_q_loss        / safe_q_denom
+
+            # --- TensorBoard logging ---
+            writer.add_scalar("World Model/combined_loss",      avg_combined_loss, episode)
+            writer.add_scalar("World Model/reward_loss",        avg_reward_loss,   episode)
+            writer.add_scalar("World Model/done_loss",          avg_done_loss,     episode)
+            writer.add_scalar("World Model/reconstruction_loss", avg_recon_loss,   episode)
+            writer.add_scalar("World Model/prior_loss",         avg_prior_loss,    episode)
+            writer.add_scalar("Reconstruction/l1_loss",         avg_l1_loss,       episode)
+            writer.add_scalar("Reconstruction/ssim_loss",       avg_ssim_loss,     episode)
+            writer.add_scalar("Reconstruction/edge_loss",       avg_edge_loss,     episode)
+            writer.add_scalar("Train/wm_updates_per_episode",   wm_updates,        episode)
+            writer.add_scalar("Train/q_updates_per_episode",    q_updates,         episode)
+            writer.add_scalar("Train/target_update_interval",   self.target_update_interval, episode)
+            writer.add_scalar("Train/updates_per_cycle_wm",     current_ratio[0],  episode)
+            writer.add_scalar("Train/updates_per_cycle_q",      current_ratio[1],  episode)
+            writer.add_scalar("Train/episode_reward",           episode_reward,    episode)
+            writer.add_scalar("Train/epsilon",                  self.epsilon,      episode)
+            writer.add_scalar("Train/imagine_epsilon",          self.imagine_epsilon, episode)
+            writer.add_scalar("Train/avg_q_loss",               avg_q_loss,        episode)
 
             if q_updates > 0:
-                avg_imag_reward = total_imag_reward / q_updates
-                real_reward_per_step = episode_reward / episode_steps if episode_steps > 0 else 0.0
-                writer.add_scalar("Imagination/mean_reward_per_step", avg_imag_reward, episode)
+                avg_imag_reward        = total_imag_reward / q_updates
+                real_reward_per_step   = episode_reward / episode_steps if episode_steps > 0 else 0.0
+                writer.add_scalar("Imagination/mean_reward_per_step", avg_imag_reward,      episode)
                 writer.add_scalar("Imagination/real_reward_per_step", real_reward_per_step, episode)
-                writer.add_scalar("Imagination/vs_real_reward_diff", avg_imag_reward - real_reward_per_step, episode)
+                writer.add_scalar("Imagination/vs_real_reward_diff",
+                                  avg_imag_reward - real_reward_per_step, episode)
 
             if episode % 100 == 0:
-                print(f"Completed episode {episode} - Reward loss: {avg_reward_loss}")
-
-            writer.add_scalar("Train/episode_reward", episode_reward, episode)
-            writer.add_scalar("Train/epsilon", self.epsilon, episode)
-            writer.add_scalar("Train/imagine_epsilon", self.imagine_epsilon, episode)
-            writer.add_scalar("Train/avg_q_loss", episode_loss, episode)
+                print(f"Completed episode {episode} — reward loss: {avg_reward_loss:.4f} | "
+                      f"prior loss: {avg_prior_loss:.4f}")
 
             if episode % 10 == 0:
                 self.evaluate_reconstruction(num_samples=4, filename="reconstruction_test.png")
-
-            if episode % 10 == 0:
                 self.save()
-
-
-
-
