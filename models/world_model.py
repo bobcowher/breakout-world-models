@@ -193,7 +193,10 @@ class WorldModel(BaseModel):
         next_embed_target = next_embeds.view(-1, next_embeds.shape[-1])  # (B, embed_dim)
 
         # MSE between predicted and actual next embedding
-        dynamics_loss = F.mse_loss(next_embed_pred, next_embed_target.detach())
+        # Up-weight transitions where reward fired (brick hits, life losses) — 2× emphasis
+        per_sample_dynamics = F.mse_loss(next_embed_pred, next_embed_target.detach(), reduction='none').mean(dim=1)
+        reward_weights = 1.0 + rewards.float().abs()  # {0-reward: 1.0, nonzero: 2.0}
+        dynamics_loss = (reward_weights * per_sample_dynamics).mean()
 
         # === 3. Reward Loss ===
         # Reward is in range [-1, 0, 1] after life penalty
