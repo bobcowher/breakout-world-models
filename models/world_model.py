@@ -202,6 +202,12 @@ class WorldModel(BaseModel):
         # Reward is in range [-1, 0, 1] after life penalty
         reward_loss = F.mse_loss(reward_pred.squeeze(-1), rewards.float())
 
+        # Supervise dynamics output with same reward head — forces dynamics to
+        # preserve reward-relevant features (ball position, brick proximity) through rollout steps
+        next_embed_action = torch.cat([next_embed_pred, action_onehot], dim=-1)
+        next_reward_pred = torch.tanh(self.reward_pred(next_embed_action))
+        dynamics_reward_loss = F.mse_loss(next_reward_pred.squeeze(-1), rewards.float())
+
         # === 4. Done Loss ===
         # Binary classification
         done_loss = F.binary_cross_entropy(done_pred.squeeze(-1), dones.float())
@@ -211,6 +217,7 @@ class WorldModel(BaseModel):
             1.0 * recon_loss +
             1.0 * dynamics_loss +
             2.0 * reward_loss +
+            2.0 * dynamics_reward_loss +
             0.5 * done_loss
         )
 
@@ -219,6 +226,7 @@ class WorldModel(BaseModel):
             "recon": recon_loss.item(),
             "dynamics": dynamics_loss.item(),
             "reward": reward_loss.item(),
+            "dynamics_reward": dynamics_reward_loss.item(),
             "done": done_loss.item(),
             "l1": l1_loss.item(),
             "ssim": structural_loss.item(),

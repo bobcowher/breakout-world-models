@@ -164,6 +164,7 @@ class Agent:
         total_loss = 0.0
         total_recon = 0.0
         total_dynamics = 0.0
+        total_dynamics_reward = 0.0
         total_reward = 0.0
         total_done = 0.0
         total_l1 = 0.0
@@ -185,6 +186,7 @@ class Agent:
             total_loss += loss_dict["total"]
             total_recon += loss_dict["recon"]
             total_dynamics += loss_dict["dynamics"]
+            total_dynamics_reward += loss_dict["dynamics_reward"]
             total_reward += loss_dict["reward"]
             total_done += loss_dict["done"]
             total_l1 += loss_dict["l1"]
@@ -195,14 +197,15 @@ class Agent:
         avg_total = total_loss / epochs
         avg_recon = total_recon / epochs
         avg_dynamics = total_dynamics / epochs
+        avg_dynamics_reward = total_dynamics_reward / epochs
         avg_reward = total_reward / epochs
         avg_done = total_done / epochs
         avg_l1 = total_l1 / epochs
         avg_ssim = total_ssim / epochs
         avg_edge = total_edge / epochs
 
-        # Return format: combined, reward, done, recon, dynamics, l1, ssim, edge
-        return avg_total, avg_reward, avg_done, avg_recon, avg_dynamics, avg_l1, avg_ssim, avg_edge
+        # Return format: combined, reward, done, recon, dynamics, dynamics_reward, l1, ssim, edge
+        return avg_total, avg_reward, avg_done, avg_recon, avg_dynamics, avg_dynamics_reward, avg_l1, avg_ssim, avg_edge
 
     
 
@@ -429,7 +432,7 @@ class Agent:
             for offline_epoch in range(offline_training_epochs):
                 # World model updates
                 for _ in range(current_ratio[0]):
-                    combined_loss, reward_loss, done_loss, recon_loss, dynamics_loss, l1_loss, ssim_loss, edge_loss = self.train_world_model(epochs=1, batch_size=wm_batch_size)
+                    combined_loss, reward_loss, done_loss, recon_loss, dynamics_loss, dynamics_reward_loss, l1_loss, ssim_loss, edge_loss = self.train_world_model(epochs=1, batch_size=wm_batch_size)
                     total_combined_loss += combined_loss
                     total_reward_loss += reward_loss
                     total_done_loss += done_loss
