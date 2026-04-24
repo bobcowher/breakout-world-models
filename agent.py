@@ -170,14 +170,8 @@ class Agent:
 
                 current_hidden_states = next_hidden_states
 
-        # Flatten along batch × horizon
-        hidden_states      = torch.cat(all_hidden_states,      dim=0)   # (B*H, rssm_hidden_dim)
-        actions            = torch.cat(all_actions,            dim=0)   # (B*H,)
-        rewards            = torch.cat(all_rewards,            dim=0)   # (B*H,)
-        next_hidden_states = torch.cat(all_next_hidden_states, dim=0)   # (B*H, rssm_hidden_dim)
-        dones              = torch.cat(all_dones,              dim=0)   # (B*H,)
-
-        return hidden_states, actions, rewards, next_hidden_states, dones
+        # Return per-step lists for λ-return computation in the caller
+        return all_hidden_states, all_actions, all_rewards, all_next_hidden_states, all_dones
 
     # ------------------------------------------------------------------
     # World model training (sequence-based for RSSM BPTT)
@@ -251,37 +245,51 @@ class Agent:
     # Q-model training on imagined trajectories
     # ------------------------------------------------------------------
 
-    def train_q_model_on_imagination(self, horizon, batch_size, epochs=1):
+    def train_q_model_on_imagination(self, horizon, batch_size, epochs=1, lambda_val=0.95):
         """
-        Train the Q-model on imagined trajectories in RSSM hidden-state space.
+        Train the Q-model on imagined trajectories using λ-returns.
 
-        Uses Double DQN targets:
-          - Online network selects the best next action
-          - Target network evaluates that action's Q-value
-        This reduces the overestimation bias of standard DQN.
+        λ-returns mix 1-step and multi-step targets across the full horizon:
+          V_λ(s_t) = r_t + γ(1-d_t)[(1-λ)V(s_{t+1}) + λ V_λ(s_{t+1})]
+        computed backwards from a bootstrap at the end of the rollout.
+        This propagates credit (e.g. a brick hit at step 10) all the way
+        back to step 1's Q-target.  λ=0.95 → strong multi-step signal.
         """
         total_q_loss      = 0.0
         total_imag_reward = 0.0
 
         for _ in range(epochs):
-            hidden_states, actions, rewards, next_hidden_states, dones = \
+            all_hidden, all_actions, all_rewards, all_next_hidden, all_dones = \
                 self.imagine_trajectory(batch_size, horizon)
 
-            actions = actions.unsqueeze(1).long()
-            rewards = rewards.unsqueeze(1)
-            dones   = dones.unsqueeze(1).float()
-
-            # Current Q-values for the actions taken
-            q_values     = self.q_model(hidden_states)
-            q_sa         = q_values.gather(1, actions)
-
+            # Compute λ-returns backwards through the rollout
             with torch.no_grad():
-                # Double DQN: online network picks action, target network evaluates it
-                best_next_actions = self.q_model(next_hidden_states).argmax(dim=1, keepdim=True)
-                next_q_values     = self.target_q_model(next_hidden_states).gather(1, best_next_actions)
-                td_targets        = rewards + (1 - dones) * self.gamma * next_q_values
+                # Batch all next-hidden states for a single forward pass: (H*B, hidden_dim)
+                stacked_next   = torch.cat(all_next_hidden, dim=0)
+                best_next_acts = self.q_model(stacked_next).argmax(dim=1, keepdim=True)
+                v_next_all     = self.target_q_model(stacked_next).gather(1, best_next_acts)
+                v_next         = v_next_all.view(horizon, batch_size, 1)  # (H, B, 1)
 
-            q_loss = F.mse_loss(q_sa, td_targets)
+                lambda_returns = []
+                next_lam = v_next[-1]  # bootstrap: V_λ(s_{H+1}) = V(s_H)
+
+                for t in reversed(range(horizon)):
+                    r        = all_rewards[t].unsqueeze(1)  # (B, 1)
+                    d        = all_dones[t].unsqueeze(1)    # (B, 1)
+                    next_lam = r + self.gamma * (1 - d) * (
+                        (1 - lambda_val) * v_next[t] + lambda_val * next_lam
+                    )
+                    lambda_returns.insert(0, next_lam)
+
+            # Flatten across H*B for Q update
+            hidden_states = torch.cat(all_hidden,       dim=0)              # (H*B, hidden_dim)
+            actions       = torch.cat(all_actions,      dim=0).unsqueeze(1).long()  # (H*B, 1)
+            targets       = torch.cat(lambda_returns,   dim=0)              # (H*B, 1)
+
+            q_values = self.q_model(hidden_states)
+            q_sa     = q_values.gather(1, actions)
+
+            q_loss = F.mse_loss(q_sa, targets)
 
             self.q_model_optimizer.zero_grad()
             q_loss.backward()
@@ -292,7 +300,7 @@ class Agent:
                 self.target_q_model.load_state_dict(self.q_model.state_dict())
 
             total_q_loss      += q_loss.item()
-            total_imag_reward += rewards.mean().item()
+            total_imag_reward += torch.cat(all_rewards, dim=0).mean().item()
             self.total_steps  += 1
 
         return total_q_loss / epochs, total_imag_reward / epochs
