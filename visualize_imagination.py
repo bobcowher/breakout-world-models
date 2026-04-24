@@ -17,10 +17,10 @@ GAP       = 4   # pixel gap between real and imagined panels
 MAX_STEPS = 32  # extended rollout for reward correlation analysis
 
 
-def embed_to_frame(embed, world_model):
-    """Decode a latent embed to a uint8 HWC numpy frame."""
+def hidden_state_to_frame(hidden_state, world_model):
+    """Decode an RSSM hidden state to a uint8 HWC numpy frame."""
     with torch.no_grad():
-        img = world_model.decode(embed)  # (1, C, H, W) in [0,1]
+        img = world_model.decode(hidden_state)  # (1, C, H, W) in [0,1]
     img = img.squeeze(0).permute(1, 2, 0).cpu().numpy()
     img = np.clip(img, 0.0, 1.0)
     return (img * 255).astype(np.uint8)
@@ -79,23 +79,24 @@ def main():
 
     n_actions = agent.world_model.n_actions
 
-    def get_initial_embed():
+    def get_initial_hidden_state():
+        """Warm up with 30 random steps, then encode the final obs into an RSSM hidden state."""
         obs, _ = env.reset()
         for i in range(30):
             action = 1 if i == 0 else env.action_space.sample()
             obs, _, term, trunc, _ = env.step(action)
             if term or trunc:
                 obs, _ = env.reset()
-        obs_tensor = agent.process_observation(obs)
-        obs_norm   = obs_tensor.float().unsqueeze(0).to(device) / 255.0
+        obs_tensor   = agent.process_observation(obs)
+        obs_norm     = obs_tensor.float().unsqueeze(0).to(device) / 255.0
         with torch.no_grad():
-            embed = agent.world_model.encode(obs_norm).squeeze(1)
-        return obs_tensor, embed
+            hidden_state = agent.world_model.encode_observation_to_hidden(obs_norm)
+        return obs_tensor, hidden_state
 
     cv2.namedWindow("Imagination Rollout", cv2.WINDOW_AUTOSIZE)
     delay_ms = int(1000 / FPS)
 
-    obs_tensor, current_embed = get_initial_embed()
+    obs_tensor, current_hidden_state = get_initial_hidden_state()
     # Show the real starting frame on both panels before the loop begins
     start_frame = obs_to_frame(obs_tensor)
     cv2.imshow("Imagination Rollout", make_display(start_frame, start_frame, 0, 0.0, 0.0))
@@ -107,12 +108,12 @@ def main():
     try:
         while True:
             with torch.no_grad():
-                # === Imagination: action from imagined embed (closed loop) ===
-                action_idx    = agent.q_model(current_embed).argmax(dim=1)    # (1,)
+                # === Imagination: select action from RSSM hidden state (closed loop) ===
+                action_idx    = agent.q_model(current_hidden_state).argmax(dim=1)  # (1,)
                 action_onehot = F.one_hot(action_idx, num_classes=n_actions).float()
 
-                next_embed, reward_pred, done_pred = agent.world_model.imagine_step(
-                    current_embed, action_onehot
+                next_hidden_state, reward_pred, done_pred = agent.world_model.imagine_step(
+                    current_hidden_state, action_onehot
                 )
                 imag_reward = reward_pred.item()
                 imag_done   = done_pred.item() > 0.5
@@ -121,8 +122,8 @@ def main():
                 next_obs_raw, real_reward, real_term, real_trunc, _ = env.step(action_idx.item())
                 next_obs_tensor = agent.process_observation(next_obs_raw)
 
-                # Decode imagined frame for display
-                imag_frame = embed_to_frame(next_embed, agent.world_model)
+                # Decode imagined frame from RSSM hidden state
+                imag_frame = hidden_state_to_frame(next_hidden_state, agent.world_model)
                 real_frame = obs_to_frame(next_obs_tensor)
 
             panel = make_display(real_frame, imag_frame, step, real_reward, imag_reward)
@@ -132,10 +133,10 @@ def main():
             if key == ord('q'):
                 break
 
-            current_embed = next_embed
+            current_hidden_state = next_hidden_state
             step += 1
 
-            if imag_done or real_term or real_trunc or step >= MAX_STEPS:
+            if imag_done or real_term or real_trunc or step >= MAX_STEPS:  # noqa
                 print(f"Episode ended at step {step}. Closing in 10 seconds (press 'q' to quit early).")
                 if cv2.waitKey(10000) & 0xFF == ord('q'):
                     break
