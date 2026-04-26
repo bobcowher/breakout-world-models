@@ -254,6 +254,40 @@ class Agent:
 
 
 
+    def train_q_model_on_real(self, batch_size):
+        """One Double DQN update on real transitions, encoded via world model encoder."""
+        if not self.memory.can_sample(batch_size):
+            return 0.0
+
+        obs, actions, rewards, next_obs, dones = self.memory.sample_buffer(batch_size)
+
+        with torch.no_grad():
+            states      = self.world_model.encode(self.normalize_observation(obs)).squeeze(1)
+            next_states = self.world_model.encode(self.normalize_observation(next_obs)).squeeze(1)
+
+        actions = actions.unsqueeze(1).long()
+        rewards = rewards.unsqueeze(1)
+        dones   = dones.unsqueeze(1).float()
+
+        q_sa = self.q_model(states).gather(1, actions)
+
+        with torch.no_grad():
+            next_actions = self.q_model(next_states).argmax(dim=1, keepdim=True)
+            next_q       = self.target_q_model(next_states).gather(1, next_actions)
+            targets      = rewards + (1 - dones) * self.gamma * next_q
+
+        loss = F.mse_loss(q_sa, targets)
+        self.q_model_optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.q_model.parameters(), max_norm=1.0)
+        self.q_model_optimizer.step()
+
+        if self.total_steps % self.target_update_interval == 0:
+            self.target_q_model.load_state_dict(self.q_model.state_dict())
+
+        self.total_steps += 1
+        return loss.item()
+
     def evaluate_reconstruction(self, num_samples=4, filename="reconstruction_test.png"):
         """Evaluate reconstruction quality by comparing original vs reconstructed observations.
 
@@ -422,6 +456,7 @@ class Agent:
             total_ssim_loss = 0
             total_edge_loss = 0
             total_q_loss = 0
+            total_real_q_loss = 0.0
             total_imag_reward = 0
             wm_updates = 0
             q_updates = 0
@@ -445,6 +480,9 @@ class Agent:
                     q_loss, imag_reward = self.train_q_model_on_imagination(rollout_steps, batch_size, epochs=1)
                     total_q_loss += q_loss
                     total_imag_reward += imag_reward
+
+                    real_q_loss = self.train_q_model_on_real(batch_size)
+                    total_real_q_loss += real_q_loss
                     q_updates += 1
 
             # Average the losses
@@ -457,6 +495,7 @@ class Agent:
             avg_ssim_loss = total_ssim_loss / wm_updates if wm_updates > 0 else 0
             avg_edge_loss = total_edge_loss / wm_updates if wm_updates > 0 else 0
             episode_loss = total_q_loss / q_updates if q_updates > 0 else 0
+            avg_real_q_loss = total_real_q_loss / q_updates if q_updates > 0 else 0
 
             # Log all losses
             writer.add_scalar("World Model/combined_loss", avg_combined_loss, episode)
@@ -487,6 +526,7 @@ class Agent:
             writer.add_scalar("Train/epsilon", self.epsilon, episode)
             writer.add_scalar("Train/imagine_epsilon", self.imagine_epsilon, episode)
             writer.add_scalar("Train/avg_q_loss", episode_loss, episode)
+            writer.add_scalar("Train/avg_real_q_loss", avg_real_q_loss, episode)
 
             if episode % 10 == 0:
                 self.evaluate_reconstruction(num_samples=4, filename="reconstruction_test.png")
